@@ -1,0 +1,66 @@
+worker_processes auto;
+events { worker_connections 4096; }
+
+http {
+    include mime.types;
+    default_type application/octet-stream;
+    sendfile on;
+    tcp_nopush on;
+    tcp_nodelay on;
+    keepalive_timeout 75;
+    client_max_body_size 16m;
+    proxy_http_version 1.1;
+    proxy_socket_keepalive on;
+    access_log off;
+
+    map $http_upgrade $mlp_conn {
+        default "close";
+        websocket "upgrade";
+    }
+
+    server {
+        listen ${NGINX_PORT};
+        server_name _;
+
+        # ── VLESS روی WebSocket (به Xray) ──
+        location ${WS_PATH} {
+            proxy_pass http://127.0.0.1:${XRAY_WS_PORT};
+            proxy_set_header Upgrade $http_upgrade;
+            proxy_set_header Connection $mlp_conn;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            proxy_read_timeout 3600s;
+            proxy_send_timeout 3600s;
+            proxy_buffering off;
+        }
+
+        # ── VLESS روی XHTTP (SplitHTTP) ──
+        location ${XHTTP_PATH} {
+            proxy_pass http://127.0.0.1:${XRAY_XHTTP_PORT};
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            proxy_buffering off;
+            proxy_request_buffering off;
+            chunked_transfer_encoding on;
+            proxy_read_timeout 3600s;
+            proxy_send_timeout 3600s;
+            gzip off;
+        }
+
+        # ── بقیه‌ی مسیرها: سایت پوششی و کنترل‌پلین سبک ──
+        location / {
+            proxy_pass http://127.0.0.1:${INTERNAL_PORT};
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            proxy_set_header Upgrade $http_upgrade;
+            proxy_set_header Connection $mlp_conn;
+            proxy_read_timeout 300s;
+        }
+    }
+}

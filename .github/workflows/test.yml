@@ -1,0 +1,45 @@
+name: e2e
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: install deps
+        run: pip install -r panel/requirements.txt -r node/requirements.txt
+      - name: setup files bundle is in sync
+        run: python tools/gen_setup_files.py --check
+
+      - name: python syntax check
+        run: |
+          python -m compileall -q panel/app node/app
+      - name: end-to-end test (panel + node + real VLESS client)
+        run: |
+          python -c "import websockets, httpx, fastapi, uvicorn; print('deps ok')"
+          set +e
+          python -u tools/e2e_test.py > /tmp/e2e.raw 2>&1
+          code=$?
+          tr -d '\000' < /tmp/e2e.raw | sed 's/\x1b\[[0-9;]*m//g' > /tmp/e2e.log || true
+          if [ $code -ne 0 ]; then
+            {
+              echo "### ❌ خروجی تست e2e (خطاها)"
+              echo '```'
+              grep -nE "FAIL|Traceback|Error|Exception|نتیجه:" /tmp/e2e.log | tail -60 || true
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            grep -E "FAIL" /tmp/e2e.log | head -20 | while IFS= read -r line; do
+              echo "::error title=e2e FAIL::$line"
+            done
+            tail -80 /tmp/e2e.log
+          else
+            grep -E "نتیجه:" /tmp/e2e.log || true
+          fi
+          exit $code

@@ -1,0 +1,14 @@
+# اگر سرویس را از ریشه‌ی ریپو بسازی، همین فایل پنل را با Dockerfile ریشه بالا می‌آورد.
+# (برای سرویس‌های نود، Root Directory = node را بگذار تا node/railway.toml خوانده شود.)
+[build]
+builder = "dockerfile"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+healthcheckPath = "/healthz"
+healthcheckTimeout = 120
+restartPolicyType = "ALWAYS"
+
+[env]
+MLP_DATA_DIR = "/data"
+MLP_SUB_PATH = "sub"

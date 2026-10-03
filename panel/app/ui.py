@@ -154,7 +154,9 @@ function pageDash() {
       '<div><small class="mut">کاربران</small><b>' + (st.clients || 0) + '</b></div>' +
       '<div><small class="mut">CPU</small><b>' + (st.cpu ? st.cpu + '%' : '—') + '</b></div>' +
       '<div><small class="mut">موتور</small><b style="font-size:15px">' + esc((st.engine || l.engine || 'python')) + '</b></div></div>' +
-      '<div class="mut" style="margin-top:8px">مسیر خروج: ' + esc(l.egress_mode || 'direct') + ' · آخرین خبر: ' + ago(l.seen_ago) + '</div></div>';
+      '<div class="mut" style="margin-top:8px">مسیر خروج: ' + esc(l.egress_mode || 'direct') +
+      (l.geo_ip ? ' · IP: <span style="direction:ltr">' + esc(l.geo_ip) + '</span> ' + esc(l.geo_flag || '') : '') +
+      ' · آخرین خبر: ' + ago(l.seen_ago) + '</div></div>';
   }).join('') || '<div class="card mut">هنوز لوکیشنی نساخته‌ای. از تب «لوکیشن‌ها» یا «آموزش راه‌اندازی» شروع کن.</div>';
   return '<div class="grid g4">' +
     '<div class="card stat"><small>کاربران</small><b>' + (s.users || 0) + '</b><div class="mut">فعال ' + (s.active_users || 0) + ' · محدود ' + (s.limited_users || 0) + ' · منقضی ' + (s.expired_users || 0) + '</div></div>' +
@@ -172,7 +174,10 @@ function pageDash() {
 // ═════════════════════ لوکیشن‌ها ═════════════════════
 function pageLocations() {
   const rows = (S.locs || []).map(l => '<tr>' +
-    '<td><b>' + esc(l.flag) + ' ' + esc(l.name) + '</b><div class="mut">' + esc(l.region || '') + '</div></td>' +
+    '<td><b>' + esc(l.flag) + ' ' + esc(l.name) + '</b><div class="mut">' + esc(l.region || '') + '</div>' +
+    (l.geo_ip ? '<div class="mut" style="direction:ltr;text-align:right">🌐 ' + esc(l.geo_ip) +
+      (l.geo_country ? ' · ' + esc(l.geo_flag || '') + ' ' + esc(l.geo_country) : '') +
+      (l.geo_city ? ' · ' + esc(l.geo_city) : '') + '</div>' : '<div class="mut">IP نامشخص — «IP من» را بزن</div>') + '</td>' +
     '<td><code style="padding:4px 6px">' + esc(l.host || '—') + '</code>' +
     (l.cf_host ? '<div class="mut">CF: ' + esc(l.cf_host) + '</div>' : '') + '</td>' +
     '<td>' + (l.transports || []).map(t => '<span class="pill">' + esc(t) + '</span>').join(' ') +
@@ -182,6 +187,8 @@ function pageLocations() {
     '<td><div class="row"><button class="sm ghost" onclick="locEdit(' + l.id + ')">ویرایش</button>' +
     '<button class="sm ghost" onclick="locEnv(' + l.id + ')">متغیرهای نود</button>' +
     '<button class="sm ghost" onclick="locEgressTest(' + l.id + ')">تست خروج</button>' +
+    '<button class="sm ghost" onclick="locGeo(' + l.id + ')">IP من</button>' +
+    '<button class="sm ghost" onclick="locScan(' + l.id + ')">اسکن</button>' +
     '<button class="sm ghost" onclick="locRotate(' + l.id + ')">توکن جدید</button>' +
     '<button class="sm bad" onclick="locDel(' + l.id + ')">حذف</button></div></td></tr>').join('')
     || '<tr><td colspan="6" class="mut">لوکیشنی ثبت نشده است.</td></tr>';
@@ -213,12 +220,64 @@ function locForm(l) {
   '<div class="row"><div style="flex:1"><label>مسیر WS</label><input id="l_wsp" value="' + esc(l.ws_path || '/ws') + '"></div>' +
   '<div style="flex:1"><label>مسیر XHTTP</label><input id="l_xhp" value="' + esc(l.xhttp_path || '/xhttp') + '"></div>' +
   '<div style="flex:1"><label>پورت TCP</label><input id="l_tcpp" type="number" value="' + (l.tcp_port || 0) + '"></div></div>' +
+  '<div class="row"><div style="flex:1"><label>آی‌پی تمیز (اختیاری — کانفیگ با این IP ساخته می‌شود)</label>' +
+  '<input id="l_clean" style="direction:ltr;text-align:left" value="' + esc(l.clean_ip || '') + '" placeholder="104.16.0.1"></div>' +
+  '<div style="flex:1"><label>SNI/Host آی‌پی تمیز (اختیاری)</label>' +
+  '<input id="l_cleansni" style="direction:ltr;text-align:left" value="' + esc(l.clean_sni || '') + '"></div></div>' +
   '<label>یادداشت</label><input id="l_note" value="' + esc(l.note || '') + '">' +
   egressForm(l) +
   '<div class="row"><button class="ok" onclick="locSave(' + (l.id || 0) + ')">ذخیره</button>' +
   '<button class="ghost" onclick="closeModal()">انصراف</button></div>';
 }
 function locEdit(id) { const l = id ? (S.locs || []).find(x => x.id === id) : null; openModal(locForm(l)); if (typeof egressToggle === 'function') egressToggle(); }
+async function locGeo(id) {
+  toast('در حال پرسیدن IP از نود…');
+  try {
+    const d = await api('/api/admin/locations/' + id + '/geo', 'POST', {});
+    const g = d.geo || {};
+    openModal('<h3>IP و موقعیت خروجی این لوکیشن</h3>' +
+      '<div class="grid" style="grid-template-columns:1fr 1fr"><div class="card stat"><small>IP</small><b style="direction:ltr;text-align:right;font-size:16px">' + esc(g.ip || '—') + '</b></div>' +
+      '<div class="card stat"><small>کشور</small><b>' + esc(g.flag || '') + ' ' + esc(g.country || '—') + '</b></div>' +
+      '<div class="card stat"><small>شهر</small><b style="font-size:16px">' + esc(g.city || '—') + '</b></div>' +
+      '<div class="card stat"><small>از مسیر</small><b style="font-size:14px">' + esc(g.via || g.mode || '—') + '</b></div></div>' +
+      '<div class="row" style="margin-top:10px"><button class="ok" onclick="locApplyGeo(' + id + ')">فلگ لوکیشن را با این کشور ست کن</button>' +
+      '<button class="ghost" onclick="closeModal()">بستن</button></div>');
+    await go('locations');
+  } catch (e) { toast('نود پاسخ نداد: ' + e.message, 1); }
+}
+async function locApplyGeo(id) {
+  try { await api('/api/admin/locations/' + id + '/apply-geo', 'POST', { set_flag: true, set_region: true });
+    toast('فلگ و توضیح لوکیشن به‌روز شد ✓'); closeModal(); await go('locations'); }
+  catch (e) { toast(e.message, 1); }
+}
+function locScan(id) {
+  const l = (S.locs || []).find(x => x.id === id) || {};
+  openModal('<h3>اسکن آی‌پی تمیز — ' + esc(l.name || '') + '</h3>' +
+    '<div class="mut">لیست آی‌پی/هاست‌ها را بگذار (هر خط یا با کاما). نود آن‌ها را تست می‌کند و سریع‌ترین را انتخاب می‌کند.</div>' +
+    '<textarea id="sc_hosts" style="direction:ltr;text-align:left;min-height:90px" placeholder="104.16.0.1\n172.64.0.1\n1.1.1.1"></textarea>' +
+    '<div class="row"><div style="flex:1"><label>پورت</label><input id="sc_port" value="443"></div>' +
+    '<div style="flex:1"><label>تعداد تلاش</label><input id="sc_attempts" value="3"></div>' +
+    '<label class="chk"><input type="checkbox" id="sc_tls" checked> TLS</label></div>' +
+    '<div class="row"><button class="ok" onclick="locScanRun(' + id + ')">شروع اسکن</button>' +
+    '<button class="ghost" onclick="closeModal()">انصراف</button></div>' +
+    '<div class="mut">آی‌پی تمیز یعنی کلاینت به آن وصل می‌شود ولی SNI/Host همان دامنه است — برای دور زدن فیلترینگ دامنه و سرعت بهتر.</div>');
+}
+async function locScanRun(id) {
+  toast('در حال اسکن… (چند ثانیه)');
+  try {
+    const d = await api('/api/admin/locations/' + id + '/scan', 'POST', {
+      hosts: $('sc_hosts').value, port: Number($('sc_port').value || 443),
+      tls: $('sc_tls').checked, attempts: Number($('sc_attempts').value || 3) });
+    const rows = ((d.scan || {}).results || []).slice(0, 20).map(r =>
+      '<tr><td style="direction:ltr;text-align:right">' + esc(r.host) + '</td>' +
+      '<td>' + (r.ok ? '<span class="pill ok">سالم</span>' : '<span class="pill bad">خطا</span>') + '</td>' +
+      '<td>' + (r.ok ? (r.latency_ms + ' ms · پایداری ' + (100 - r.loss) + '%') : esc((r.error || '').slice(0, 40))) + '</td></tr>').join('');
+    openModal('<h3>نتیجه اسکن</h3><div class="mut">' + (d.scan.scanned || 0) + ' کاندید در ' + (d.scan.seconds || 0) + ' ثانیه · سالم: ' + (d.scan.alive || 0) + '</div>' +
+      '<table style="margin-top:8px"><thead><tr><th>آدرس</th><th>وضعیت</th><th>جزئیات</th></tr></thead><tbody>' + rows + '</tbody></table>' +
+      '<div class="tip">بهترین گزینه به‌عنوان «آی‌پی تمیز» این لوکیشن ذخیره شد؛ کانفیگ‌های مشتری از همین IP ساخته می‌شوند.</div>' +
+      '<button class="ghost" onclick="closeModal();go(\'locations\')">بستن</button>');
+  } catch (e) { toast(e.message, 1); }
+}
 function egressConf(l) {
   const e = (l || {}).egress || {};
   const proxy = e.proxy || {}, chain = e.chain || {};
@@ -314,6 +373,7 @@ async function locSave(id) {
     host: $('l_host').value, cf_host: $('l_cf').value, ws_path: $('l_wsp').value, xhttp_path: $('l_xhp').value,
     engine: $('l_engine').value, tcp_port: Number($('l_tcpp').value || 0), note: $('l_note').value, enabled: true,
     decoy: $('l_decoy') ? $('l_decoy').value : '', egress_mode: $('e_mode').value, egress: egressPayload(),
+    clean_ip: $('l_clean') ? $('l_clean').value.trim() : '', clean_sni: $('l_cleansni') ? $('l_cleansni').value.trim() : '',
     transports: [$('l_ws').checked ? 'ws' : null, $('l_xhttp').checked ? 'xhttp' : null, $('l_tcp').checked ? 'tcp' : null].filter(Boolean) };
   if (!body.name) { toast('نام لازم است', 1); return; }
   if (!body.transports.length) body.transports = ['ws'];
@@ -661,6 +721,80 @@ function stepsHtml() {
       '</div></div>';
   }).join('');
 }
+function pageAuto() {
+  const plan = S.data.plan || {}, zones = S.data.regions || [];
+  const rows = (plan.nodes || []).map(n => '<tr><td>' + esc(n.flag || '') + ' ' + esc(n.name) + '</td><td>' + esc(n.region || '') +
+    '</td><td><code style="padding:2px 6px">node/' + '</code></td></tr>').join('');
+  return '<div class="grid g2">' +
+    '<div class="card"><h3>🚀 راه‌اندازی خودکار با توکن Railway</h3>' +
+    '<div class="mut">یک توکن از حساب Railway بده (Account → Tokens → Create Token)؛ من پروژه، سرویس پنل با Volume، دامنه، و همه‌ی سرویس‌های نود را می‌سازم، لوکیشن‌ها را ثبت می‌کنم و در پایان آدرس پنل + یوزر/پسورد را می‌دهم.</div>' +
+    '<label>توکن Railway</label><input id="ad_token" style="direction:ltr;text-align:left" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx">' +
+    '<div class="row"><button class="ghost" onclick="adVerify()">تست توکن</button></div>' +
+    '<label>ریپو (فورک‌شده)</label><input id="ad_repo" style="direction:ltr;text-align:left" value="' + esc((plan.repo || '')) + '" placeholder="username/repo">' +
+    '<label>نام پروژه</label><input id="ad_project" value="mlp" placeholder="mlp">' +
+    '<label>رمز ادمین (خالی = تصادفی و امن)</label><input id="ad_pass">' +
+    '<h3 style="font-size:13px;margin-top:14px">لوکیشن‌های اولیه</h3>' +
+    '<div id="ad_nodes"></div>' +
+    '<button class="ghost sm" onclick="adAddNode()">+ لوکیشن</button>' +
+    '<div class="row" style="margin-top:12px"><button class="ok" onclick="adRun()">همه‌چیز را بساز</button>' +
+    '<a href="/" target="_blank"><button class="ghost">پیش‌نمایش سایت</button></a></div>' +
+    '<div class="mut" style="margin-top:8px">پورت‌ها: پنل روی <b>8080</b> و هر نود روی <b>8080</b> (Railway خودکار تشخیص می‌دهد). ' +
+    'بدون توکن هم می‌توانی سرویس‌ها را دستی بسازی — گام‌های ۲ و ۳ در تب «آموزش راه‌اندازی».</div></div>' +
+    '<div class="card"><h3>📋 چیزی که ساخته می‌شود</h3>' +
+    '<table><thead><tr><th>سرویس</th><th>ریجن</th><th>Root</th></tr></thead><tbody>' +
+    '<tr><td>🖥 panel</td><td>—</td><td><code style="padding:2px 6px">panel</code></td></tr>' + rows + '</tbody></table>' +
+    '<div class="mut" style="margin-top:10px">زمان تقریبی: ' + (plan.estimated_minutes || 5) + ' دقیقه · ' + esc(plan.note || '') + '</div>' +
+    '<label>آدرس پنل تشخیص‌داده‌شده (اگر خالی باشد، بعد از ساخت خودکار پر می‌شود)</label>' +
+    '<input value="' + esc(S.data.base || '') + '" readonly>' +
+    '<div class="tip">توکن فقط برای ساخت سرویس‌ها استفاده می‌شود و در همین پنل ذخیره می‌ماند؛ هر وقت خواستی از Railway پاکش کن.</div>' +
+    '<div id="ad_result" class="mut"></div></div></div>' + modal();
+}
+function adAddNode(name, flag, region) {
+  const zones = S.data.regions || [];
+  const box = document.getElementById('ad_nodes');
+  const div = document.createElement('div');
+  div.className = 'row';
+  div.style.marginTop = '6px';
+  div.innerHTML = '<input class="ad-name" style="flex:1" placeholder="Germany" value="' + esc(name || '') + '">' +
+    '<input class="ad-flag" style="width:70px" value="' + esc(flag || '🇩🇪') + '">' +
+    '<select class="ad-region" style="flex:2">' + zones.map(z => '<option value="' + z[0] + '"' + (region === z[0] ? ' selected' : '') + '>' + z[1] + '</option>').join('') + '</select>';
+  box.appendChild(div);
+}
+function adNodes() {
+  return [...document.querySelectorAll('#ad_nodes .row')].map(row => ({
+    name: row.querySelector('.ad-name').value.trim(),
+    flag: row.querySelector('.ad-flag').value.trim() || '🌍',
+    region: row.querySelector('.ad-region').value,
+  })).filter(n => n.name);
+}
+async function adVerify() {
+  try { const d = await api('/api/admin/auto-deploy/verify?token=' + encodeURIComponent($('ad_token').value));
+    toast('توکن سالم است — حساب: ' + d.account); }
+  catch (e) { toast(e.message, 1); }
+}
+async function adRun() {
+  const nodes = adNodes();
+  if (!confirm('پروژه و سرویس‌ها روی Railway ساخته شوند؟ (' + (nodes.length + 1) + ' سرویس)')) return;
+  toast('در حال ساخت… چند دقیقه طول می‌کشد');
+  try {
+    const d = await api('/api/admin/auto-deploy/run', 'POST', { token: $('ad_token').value, repo: $('ad_repo').value,
+      project_name: $('ad_project').value, admin_password: $('ad_pass').value, node_specs: nodes, wait: true });
+    const lines = (d.steps || []).map(s => '<div class="mut">' + (s.level === 'error' ? '❌ ' : (s.level === 'warn' ? '⚠️ ' : '✅ ')) + esc(s.message) + '</div>').join('');
+    openModal('<h3>' + (d.ok ? 'راه‌اندازی موفق 🎉' : 'راه‌اندازی نیمه‌کاره') + '</h3>' + lines +
+      (d.panel_url ? '<div class="tip">پنل: <a href="' + esc(d.panel_url) + '" target="_blank">' + esc(d.panel_url) + '</a><br>' +
+        'یوزر: <b>admin</b> · پسورد: <code style="display:inline;padding:2px 6px">' + esc((d.admin || {}).password || '') + '</code></div>' : '') +
+      '<pre>' + esc(d.env_lines || '') + '</pre>' +
+      '<button class="ghost" onclick="closeModal();go(\'locations\')">بستن</button>');
+    if (d.ok) await go('auto');
+  } catch (e) { toast(e.message, 1); }
+}
+async function loadAuto() {
+  S.data.plan = (S.data.plan || {});
+  const d = await api('/api/admin/auto-deploy/plan');
+  S.data.plan = d.plan || {}; S.data.regions = d.regions || []; S.data.base = (d.plan || {}).panel_url || '';
+  if (d.saved_repo) S.data.plan.repo = d.saved_repo;
+}
+
 function pageSetup() {
   const files = Object.keys(S.files || {});
   return '<div class="card" style="margin-bottom:14px"><div class="row" style="justify-content:space-between">' +
@@ -775,11 +909,13 @@ async function broadcast() { const t = prompt('متن پیام همگانی:'); 
 // ═════════════════════ روتر ═════════════════════
 const PAGE_FNS = { dash: pageDash, locations: pageLocations, users: pageUsers, plans: pagePlans, orders: pageOrders,
   resellers: pageResellers, wallet: pageWallet, announcements: pageAnnouncements, brand: pageBrand, setup: pageSetup,
+  auto: pageAuto,
   events: pageEvents, settings: pageSettings };
 const PAGE_LOADERS = { dash: loadDash, locations: loadLocations, users: loadUsers, plans: loadPlans, orders: loadOrders,
   resellers: loadResellers, wallet: loadWallet, announcements: loadAnnouncements, brand: loadSettings, setup: loadSetup,
+  auto: loadAuto,
   events: loadEvents, settings: loadSettings };
-const PAGES = [['dash','داشبورد'],['locations','لوکیشن‌ها'],['users','کاربران'],['plans','پلن‌ها'],['orders','سفارش‌ها'],
+const PAGES = [['dash','داشبورد'],['auto','راه‌اندازی خودکار'],['locations','لوکیشن‌ها'],['users','کاربران'],['plans','پلن‌ها'],['orders','سفارش‌ها'],
   ['resellers','رزیلرها'],['wallet','کیف پول'],['announcements','اعلان‌ها'],['brand','برند و ظاهر'],['setup','آموزش راه‌اندازی'],
   ['events','رویدادها'],['settings','تنظیمات']];
 

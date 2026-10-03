@@ -22,29 +22,49 @@ def _fmt_bytes(n: int) -> str:
     return f"{n:.2f} TB"
 
 
-def _config_name(loc: dict, user: dict, settings: dict) -> str:
+def _config_name(loc: dict, user: dict, settings: dict, extra: dict | None = None) -> str:
     template = settings.get("config_title") or "{flag} {name} | {panel}"
-    name = template.format(
-        flag=loc.get("flag") or "🌍",
-        name=loc.get("name") or "location",
-        panel=settings.get("panel_title") or APP_NAME,
-        user=user.get("name") or "",
-        region=loc.get("region") or "",
-    )
-    return name
+    fields = {
+        "flag": loc.get("flag") or "🌍",
+        "name": loc.get("name") or "location",
+        "panel": settings.get("panel_title") or APP_NAME,
+        "user": user.get("name") or "",
+        "region": loc.get("region") or "",
+        "index": "",
+        "transport": "",
+        "ip": loc.get("geo_ip") or "",
+    }
+    fields.update(extra or {})
+    try:
+        return template.format(**fields)
+    except Exception:
+        return f"{fields['flag']} {fields['name']} | {fields['panel']}"
 
 
 def _build_link(uuid: str, loc: dict, transport: str, name: str, settings: dict) -> str | None:
     host = (loc.get("host") or "").strip().replace("https://", "").replace("http://", "").strip("/")
     cf_host = (loc.get("cf_host") or "").strip().replace("https://", "").replace("http://", "").strip("/")
+    # آی‌پی تمیز: کلاینت به IP تمیز وصل می‌شود ولی SNI/Host همان دامنه می‌ماند
+    clean_ip = (loc.get("clean_ip") or "").strip()
+    clean_sni = (loc.get("clean_sni") or "").strip()
     ws_path = loc.get("ws_path") or "/ws"
     xhttp_path = loc.get("xhttp_path") or "/xhttp"
     raw_host = cf_host or host
     raw_host = raw_host.split("/")[0].split(":")[0] if raw_host else ""
-    if not raw_host:
+    dial_host = clean_ip or raw_host
+    if not dial_host:
         return None
+    if clean_sni:
+        raw_host = clean_sni
+        host = clean_sni
     fragment = quote(name, safe="")
     if transport == "ws":
+        if clean_ip:
+            sni = raw_host
+            return (
+                f"vless://{uuid}@{dial_host}:443?encryption=none&security=tls&sni={sni}"
+                f"&fp=chrome&type=ws&host={sni}&path={quote(ws_path, safe='/')}#{fragment}"
+            )
         if cf_host:
             host_header = cf_host.split("/")[0]
             path = quote(f"{ws_path}?ed=2560", safe="/")
@@ -57,6 +77,13 @@ def _build_link(uuid: str, loc: dict, transport: str, name: str, settings: dict)
             f"&fp=chrome&type=ws&host={host}&path={quote(ws_path, safe='/')}#{fragment}"
         )
     if transport == "xhttp":
+        if clean_ip:
+            sni = raw_host
+            return (
+                f"vless://{uuid}@{dial_host}:443?encryption=none&security=tls&sni={sni}"
+                f"&fp=chrome&type=xhttp&mode=stream-up&host={sni}"
+                f"&path={quote(xhttp_path, safe='/')}#{fragment}"
+            )
         if cf_host:
             host_header = cf_host.split("/")[0]
             return (
@@ -74,24 +101,66 @@ def _build_link(uuid: str, loc: dict, transport: str, name: str, settings: dict)
         if not port:
             return None
         return (
-            f"vless://{uuid}@{raw_host}:{port}?encryption=none&security=none"
+            f"vless://{uuid}@{dial_host}:{port}?encryption=none&security=none"
             f"&fp=chrome&type=tcp&headerType=none#{fragment}"
         )
     return None
 
 
+TRANSPORT_FA = {"ws": "WS", "xhttp": "XHTTP", "tcp": "TCP"}
+
+
 def build_links(user: dict, settings: dict | None = None) -> list[dict]:
-    """برای هر لوکیشنِ فعالِ کاربر، یک لینک می‌سازد."""
+    """برای هر لوکیشنِ فعالِ کاربر، کانفیگ‌ها را **جدا و گروه‌بندی‌شده** می‌سازد.
+
+    ترتیب: اول لوکیشن‌ها بر اساس `sort`، بعد ترابردها؛ نام هر کانفیگ شامل
+    فلگ، نام لوکیشن، شماره‌ی لوکیشن همان ترابرد و نام ترابرد است.
+    """
     settings = settings or store.all_settings()
     out: list[dict] = []
-    for loc in store.enabled_locations_for_user(int(user["id"])):
-        transports = loc.get("transports") or ["ws"]
-        for transport in transports:
-            link = _build_link(user["uuid"], loc, str(transport), _config_name(loc, user, settings), settings)
+    locations = list(store.enabled_locations_for_user(int(user["id"])))
+    locations.sort(key=lambda l: (int(l.get("sort") or 0), int(l.get("id") or 0)))
+    for index, loc in enumerate(locations, start=1):
+        transports = [str(t) for t in (loc.get("transports") or ["ws"])]
+        for t_index, transport in enumerate(transports, start=1):
+            name = _config_name(loc, user, settings, {
+                "index": index,
+                "transport": TRANSPORT_FA.get(transport, transport.upper()),
+            })
+            if len(transports) > 1:
+                name = f"{name} · {TRANSPORT_FA.get(transport, transport.upper())}"
+            link = _build_link(user["uuid"], loc, transport, name, settings)
             if not link:
                 continue
-            out.append({"location": loc, "transport": transport, "link": link})
+            out.append({
+                "location": loc,
+                "location_index": index,
+                "transport": transport,
+                "transport_index": t_index,
+                "name": name,
+                "link": link,
+            })
     return out
+
+
+def group_links(links: list[dict]) -> list[dict]:
+    """کانفیگ‌ها را بر اساس لوکیشن گروه می‌کند (برای صفحه‌ی مرورگر)."""
+    groups: list[dict] = []
+    for item in links:
+        loc = item["location"]
+        if not groups or groups[-1]["id"] != loc["id"]:
+            groups.append({
+                "id": loc["id"],
+                "index": item.get("location_index") or len(groups) + 1,
+                "flag": loc.get("flag") or "🌍",
+                "name": loc.get("name") or "",
+                "country": loc.get("geo_country") or "",
+                "ip": loc.get("geo_ip") or "",
+                "region": loc.get("region") or "",
+                "items": [],
+            })
+        groups[-1]["items"].append(item)
+    return groups
 
 
 def build_text(user: dict) -> str:
@@ -150,9 +219,31 @@ def page_json(user: dict) -> dict:
                 "flag": item["location"].get("flag"),
                 "region": item["location"].get("region"),
                 "transport": item["transport"],
+                "transport_fa": TRANSPORT_FA.get(str(item["transport"]), str(item["transport"]).upper()),
+                "index": item.get("location_index"),
+                "name": item.get("name"),
+                "ip": item["location"].get("geo_ip") or item["location"].get("clean_ip") or "",
+                "country": item["location"].get("geo_country") or "",
                 "link": item["link"],
             }
             for item in links
+        ],
+        "groups": [
+            {
+                "index": g["index"],
+                "flag": g["flag"],
+                "name": g["name"],
+                "region": g["region"],
+                "ip": g["ip"],
+                "country": g["country"],
+                "configs": [
+                    {"transport": i["transport"],
+                     "transport_fa": TRANSPORT_FA.get(str(i["transport"]), str(i["transport"]).upper()),
+                     "link": i["link"], "name": i.get("name")}
+                    for i in g["items"]
+                ],
+            }
+            for g in group_links(links)
         ],
     }
 
@@ -229,8 +320,15 @@ function render(d){{
   const sub = d.sub_url;
   document.getElementById('subUrl').textContent = sub || '—';
   const list = document.getElementById('cfgList');
-  list.innerHTML = d.configs.map(c => `<div style="margin-bottom:8px"><div style="font-size:12px;margin-bottom:4px">{{c.flag}} {{c.location}} · {{c.transport}}</div><code>${{c.link}}</code></div>`).join('') || '<div>کانفیگی فعال نیست</div>';
-  document.getElementById('locs').innerHTML = d.configs.map(c => `<div class="loc"><div><div class="nm">{{c.flag}} {{c.location}}</div><div class="meta">{{c.region}} · {{c.transport}}</div></div><button class="ghost" data-c="${{c.link}}">کپی</button></div>`).join('') || '<div class="card">هنوز لوکیشنی برای این اشتراک فعال نشده است.</div>';
+  const groups = d.groups && d.groups.length ? d.groups : [{{index:1, flag:'', name:'', configs: d.configs}}];
+  list.innerHTML = groups.map(g => `<div style="margin-bottom:14px"><div style="font-weight:700;margin-bottom:6px">${{g.index}}. ${{g.flag || ''}} ${{g.name || ''}} ${{g.country ? '· ' + g.country : ''}}</div>` +
+    (g.configs || []).map(c => `<div style="margin-bottom:8px"><div style="font-size:12px;margin-bottom:4px">${{c.transport_fa || c.transport}}</div><code>${{c.link}}</code></div>`).join('') + '</div>').join('') || '<div>کانفیگی فعال نیست</div>';
+  document.getElementById('locs').innerHTML = groups.map(g => `<div class="loc" style="align-items:flex-start;flex-direction:column">
+      <div style="width:100%"><div class="nm">${{g.index}}. ${{g.flag || ''}} ${{g.name || ''}}</div>
+      <div class="meta">${{g.region || ''}} ${{g.ip ? '· ' + g.ip : ''}}</div></div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px">` +
+      (g.configs || []).map(c => `<button class="ghost" data-c="${{c.link}}">کپی ${{c.transport_fa || c.transport}}</button>`).join('') +
+      `</div></div>`).join('') || '<div class="card">هنوز لوکیشنی برای این اشتراک فعال نشده است.</div>';
   document.querySelectorAll('[data-c]').forEach(b => b.addEventListener('click', () => copy(b.getAttribute('data-c'))));
   const qr = document.getElementById('qr');
   try {{ qr.innerHTML=''; if(window.QRCode && sub) {{ new QRCode(qr, {{text: sub, width: 152, height: 152, colorDark:'#0b1020', colorLight:'#ffffff'}}); }} else {{ qr.textContent = sub || 'QR'; }} }} catch(e) {{ qr.textContent = sub || 'QR'; }}

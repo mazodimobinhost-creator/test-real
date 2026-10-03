@@ -43,11 +43,13 @@ def env_text(kind: str = "panel") -> str:
         return "\n".join(
             [
                 "# --- سرویس پنل ---",
+                "PORT=8080              # پورتی که پنل رویش بالا می‌آید (Railway خودش هم می‌دهد)",
                 f"MLP_PUBLIC_URL={base}",
                 "MLP_ADMIN_USER=admin",
-                "MLP_ADMIN_PASSWORD=یک-رمز-قوی",
-                "MLP_DATA_DIR=/data",
-                "MLP_ENGINE=python",
+                "MLP_ADMIN_PASSWORD=یک-رمز-قوی   # اجباری برای امنیت",
+                "MLP_DATA_DIR=/data     # همان مسیر Volume",
+                "# MLP_SECRET_PATH=        # اختیاری: مسیر مخفی پنل",
+                "# MLP_SUB_PATH=sub        # اختیاری: مسیر لینک ساب",
             ]
         )
     if kind == "node":
@@ -59,10 +61,13 @@ def env_text(kind: str = "panel") -> str:
                 f"MLP_NODE_TOKEN={token}",
                 "MLP_NODE_NAME=Germany",
                 "MLP_NODE_FLAG=🇩🇪",
+                "# PORT=8080            # پورت نود؛ Railway خودکار ست می‌کند",
                 "MLP_WS_PATH=/ws",
                 "MLP_XHTTP_PATH=/xhttp",
                 "MLP_ENGINE=xray",           # برای سرعت بالاتر؛ خالی بگذاری = موتور پایتون
                 "MLP_DECOY=auto",            # سایت پوششی: auto | shop | corp | blog | none
+                "MLP_GEO_ENABLED=1",         # نمایش IP و کشور خروجی در پنل
+                "# MLP_TCP_PORT=",           # فقط اگر TCP Proxy روی Railway داری
             ]
         )
     return ""
@@ -71,6 +76,29 @@ def env_text(kind: str = "panel") -> str:
 def _steps(panel_url: str) -> list[dict]:
     admin = store.secret_path()
     return [
+        {
+            "key": "step_auto",
+            "icon": "⓪",
+            "title": "سریع‌ترین راه: راه‌اندازی خودکار با توکن Railway",
+            "time": "۳ دقیقه، بدون کار دستی",
+            "text": "اگر حال و حوصله‌ی ساخت سرویس‌به‌سرویس نداری، این مسیر را برو:\n"
+                    "۱) در Railway → Account → **Tokens** → یک توکن بساز و کپی کن.\n"
+                    "۲) در پنل (اگر پنل نداری، اول مرحله‌ی ② را یک بار انجام بده) → تب **«راه‌اندازی خودکار»** → توکن را بچسبان → «تست توکن».\n"
+                    "۳) ریپوی فورک‌شده‌ات را بنویس (اگر خالی بگذاری، خود همین ریپو استفاده می‌شود)، لوکیشن‌ها و **ریجن** هرکدام را انتخاب کن.\n"
+                    "۴) «همه‌چیز را بساز» را بزن. من پروژه، سرویس پنل (با Volume روی `/data`)، دامنه، همه‌ی سرویس‌های نود، "
+                    "متغیرها، توکن‌های نود و ثبت لوکیشن‌ها در پنل را انجام می‌دهم و در پایان آدرس پنل + یوزر/پسورد را نشان می‌دهم.\n\n"
+                    "**پورت‌ها چه می‌شوند؟** همه‌ی سرویس‌ها به پورت `8080` گوش می‌دهند؛ Railway همان را به دامنه‌ی `https://...` وصل می‌کند. "
+                    "نیازی نیست چیزی دستی ست کنی — اگر خواستی، متغیر `PORT` را خودت بگذار.\n\n"
+                    "**حداقل چیزی که سرویس برای بالا آمدن لازم دارد:** یک Volume روی `/data` و رمز ادمین. بقیه اختیاری است (به‌جز `MLP_NODE_TOKEN` روی سرویس نود).",
+            "tip": "توکن Railway فقط برای ساخت سرویس‌ها استفاده می‌شود و در پنل ذخیره می‌ماند؛ هر وقت خواستی از حساب Railway پاکش کن. "
+                   "اگر توکن ندادی یا ساخت خودکار وسط راه خطا داد، همین مراحل ① تا ⑧ دستی و بی‌خطر هستند.",
+            "code": "# همان کاری که دکمه‌ی «همه‌چیز را بساز» انجام می‌دهد:\n"
+                    "projectCreate → serviceCreate(panel, root=panel) → volumeCreate(/data)\n"
+                    "  → variableUpsert(MLP_ADMIN_PASSWORD, MLP_DATA_DIR=/data, PORT=8080)\n"
+                    "  → serviceDomainCreate(port 8080)\n"
+                    "برای هر لوکیشن: serviceCreate(node, root=node, region=…) → variableUpsert(MLP_PANEL_URL, MLP_NODE_TOKEN, MLP_NODE_NAME, MLP_NODE_FLAG)\n"
+                    "  → serviceDomainCreate → ثبت خودکار لوکیشن در پنل",
+        },
         {
             "key": "step_repo",
             "icon": "①",

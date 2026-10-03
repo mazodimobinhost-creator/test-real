@@ -19,6 +19,8 @@ from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 
 from . import decoy, settings, sync, tcp_in, xhttp
 from .egress import egress
+from .geo import geo_loop
+from .safety import safety
 from .policy import policy
 from .relay import WsChannel, client_ip_from_headers, read_vless_request, run_tunnel
 
@@ -57,6 +59,7 @@ async def on_startup() -> None:
     asyncio.create_task(sync.sync_loop())
     asyncio.create_task(sync.report_loop())
     asyncio.create_task(egress.probe_loop())
+    asyncio.create_task(geo_loop())
     if USE_XRAY and xray_engine is not None:
         await asyncio.to_thread(xray_engine.start)
         asyncio.create_task(xray_engine.stats_loop())
@@ -117,6 +120,7 @@ async def healthz(request: Request):
         }
     )
     status["egress"] = egress.status()
+    status["safety"] = safety.status()
     if xray_engine is not None:
         status["xray"] = xray_engine.status()
     return JSONResponse(status)
@@ -137,6 +141,8 @@ async def info(request: Request):
         "xhttp_path": settings.XHTTP_PATH,
         "tcp_port": settings.TCP_PORT,
         "users": len(policy.users),
+        "safety": safety.status(),
+        "geo": await geo_maybe(),
         "panel_ok": sync.panel_ok(),
         "decoy": settings.DECOY,
     }
@@ -155,6 +161,44 @@ async def egress_status(request: Request, test: int = 0):
     if test:
         data["test"] = await egress.test_all()
     return JSONResponse(data)
+
+
+@app.get("/scan")
+async def scan_endpoint(request: Request):
+    """اسکن آی‌پی/هاست‌ها از روی همین نود (برای پیدا کردن خروجی تمیز و سریع).
+
+    نمونه: `/scan?key=...&hosts=1.1.1.1,8.8.8.8&port=443&tls=1`
+    """
+    if not _authorized(request):
+        return JSONResponse(_masked_ok())
+    from . import scanner
+
+    raw = (request.query_params.get("hosts") or request.query_params.get("targets") or "").strip()
+    if raw.startswith("http"):
+        targets = await scanner.scan_remote_list(raw)
+    else:
+        targets = [x for x in raw.replace("\n", ",").split(",") if x.strip()]
+    if not targets:
+        return JSONResponse({"ok": False, "error": "لیست هاست‌ها خالی است"}, status_code=400)
+    port = int(request.query_params.get("port") or 443)
+    use_tls = (request.query_params.get("tls") or "1") not in ("0", "false", "no")
+    attempts = int(request.query_params.get("attempts") or settings.SCAN_ATTEMPTS)
+    timeout = float(request.query_params.get("timeout") or settings.SCAN_TIMEOUT)
+    result = await scanner.scan(
+        targets, port=port, use_tls=use_tls, attempts=attempts, timeout=timeout,
+        sni=(request.query_params.get("sni") or "").strip(),
+    )
+    return JSONResponse({"ok": True, **result, "geo": await geo_maybe()})
+
+
+async def geo_maybe() -> dict:
+    from .geo import cached, detect
+
+    info = cached()
+    if not info:
+        with contextlib.suppress(Exception):
+            info = await asyncio.wait_for(detect(), timeout=10)
+    return info or {}
 
 
 @app.get("/_mlp/config.js")

@@ -134,6 +134,34 @@ async def vless_ws_request(uuid_str: str, target_host: str, target_port: int, pa
 
 
 # ═════════════ فوترهای تست مسیر خروج (پروکسی IP / تانل) ═════════════
+
+
+class _FakeClient:
+    def __init__(self, host: str) -> None:
+        self.host = host
+
+
+class _FakeURL:
+    def __init__(self, path: str) -> None:
+        self.path = path
+
+
+class _FakeRequest:
+    """درخواست ساختگی برای تست مستقیم میان‌افزار ضدِ اسکن."""
+
+    def __init__(self, ip: str, path: str) -> None:
+        self.headers = {"x-forwarded-for": ip}
+        self.client = _FakeClient(ip)
+        self.url = _FakeURL(path)
+
+
+class _FakeResp:
+    status_code = 404
+
+
+async def _fake_next(request):
+    return _FakeResp()
+
 class MiniSocks5:
     """پروکسی SOCKS5 حداقلی برای تست: هر اتصال را به مقصد واقعی پل می‌زند."""
 
@@ -691,7 +719,7 @@ async def main() -> int:
         panel_ui = await client.get(f"http://127.0.0.1:{PANEL_PORT}{secret}")
         login_ui = await client.get(f"http://127.0.0.1:{PANEL_PORT}{secret}?fresh=1")
     html_ui = panel_ui.text
-    tabs = ["داشبورد", "لوکیشن‌ها", "کاربران", "پلن‌ها", "سفارش‌ها", "رزیلرها", "کیف پول",
+    tabs = ["داشبورد", "راه‌اندازی خودکار", "لوکیشن‌ها", "کاربران", "پلن‌ها", "سفارش‌ها", "رزیلرها", "کیف پول",
             "اعلان‌ها", "برند و ظاهر", "آموزش راه‌اندازی", "رویدادها", "تنظیمات"]
     check(panel_ui.status_code == 200 and all(t in html_ui for t in tabs), "همه‌ی تب‌های پنل در رابط کاربری", f"{len(tabs)} تب")
     check("آموزش راه‌اندازی" in html_ui and "dlFile" in html_ui and "download(" in html_ui,
@@ -700,6 +728,9 @@ async def main() -> int:
           "قالب UI پس از جای‌گذاری متغیرها سالم است")
     check(html_ui.count("<html") == 1 and html_ui.count("/api/admin/") >= 10 and "async function go(" in html_ui,
           "UI یک سند مستقل با API‌های واقعی", f"api_refs={html_ui.count('/api/admin/')}")
+    check("auto-deploy/run" in html_ui and "همه‌چیز را بساز" in html_ui and "آی‌پی تمیز" in html_ui
+          and "locGeo" in html_ui and "locScanRun" in html_ui,
+          "دکمه‌ی راه‌اندازی خودکار و ابزار IP/اسکن در رابط کاربری")
 
     # ── موتور Xray (بدون باینری → config-only) ──
     print(f"{YELLOW}==> تست موتور Xray (حالت پیکربندی){RESET}")
@@ -973,6 +1004,98 @@ async def main() -> int:
             proc.send_signal(signal.SIGTERM)
             proc.wait(timeout=8)
     await socks.stop()
+
+    # ── IP/موقعیت لوکیشن، اسکنر، ضدِ اسکن و راه‌اندازی خودکار ──
+    print(f"{YELLOW}==> تست IP و موقعیت لوکیشن، اسکنر و دکمه‌ی راه‌اندازی خودکار{RESET}")
+    import httpx as _httpx3
+
+    async with _httpx3.AsyncClient(timeout=30.0, cookies=dict(cookies)) as client:
+        # نود واقعی موقعیتش را می‌فرستد (شبیه‌سازی همان payload نود)
+        sync_payload = {
+            "status": {"clients": 2, "engine": "python"},
+            "geo": {"ip": "203.0.113.7", "country_code": "DE", "country": "Germany", "flag": "🇩🇪",
+                    "city": "Frankfurt", "isp": "Test ISP", "via": "direct", "checked_at": int(time.time())},
+        }
+        r_sync = await client.post(f"http://127.0.0.1:{PANEL_PORT}/api/node/sync", json=sync_payload,
+                                   headers={"Authorization": f"Bearer {token}"})
+        check(r_sync.status_code == 200 and (r_sync.json().get("node") or {}).get("geo", {}).get("ip") == "203.0.113.7",
+              "نود IP/موقعیت را به پنل خبر می‌دهد")
+
+        _, overview2 = await http_json(f"http://127.0.0.1:{PANEL_PORT}/api/admin/overview", cookies=cookies)
+        row = next((l for l in overview2.get("locations", []) if l["id"] == location["id"]), {})
+        check(row.get("geo_ip") == "203.0.113.7" and row.get("geo_country_code") == "DE"
+              and row.get("geo_flag") == "🇩🇪" and row.get("geo_city") == "Frankfurt",
+              "پنل IP و کشور/شهر لوکیشن را نگه می‌دارد", f"{row.get('geo_ip')} {row.get('geo_flag')}")
+
+        # اندپوینت «IP من»: نود محلی موقعیت ندارد (بدون اینترنت) → خطای گویا؛ ولی مسیر سالم است
+        r_geo = await client.post(f"http://127.0.0.1:{PANEL_PORT}/api/admin/locations/{location['id']}/geo", json={})
+        check(r_geo.status_code in (200, 502), "دکمه‌ی «IP من» به نود وصل می‌شود", f"HTTP {r_geo.status_code}")
+
+        # اسکنر روی نود محلی: پورت خود نود را اسکن کن
+        r_scan = await client.post(f"http://127.0.0.1:{PANEL_PORT}/api/admin/locations/{location['id']}/scan",
+                                   json={"hosts": "127.0.0.1", "port": NODE_PORT, "tls": False, "attempts": 2})
+        scan_data = (r_scan.json().get("scan") or {}) if r_scan.status_code == 200 else {}
+        check(r_scan.status_code == 200 and scan_data.get("alive", 0) >= 1 and scan_data.get("best", {}).get("host") == "127.0.0.1",
+              "اسکنر از روی نود کار می‌کند و بهترین خروجی را انتخاب می‌کند",
+              f"alive={scan_data.get('alive')} best={(scan_data.get('best') or {}).get('host')}")
+        _, locs_after_scan = await http_json(f"http://127.0.0.1:{PANEL_PORT}/api/admin/locations", cookies=cookies)
+        scanned_loc = next((l for l in locs_after_scan.get("locations", []) if l["id"] == location["id"]), {})
+        check(scanned_loc.get("clean_ip") == "127.0.0.1", "آی‌پی تمیز روی لوکیشن ذخیره شد")
+
+        # کانفیگ کاربر باید با IP تمیز ساخته شود و نامش لوکیشن را نشان دهد
+        r_plain = await client.get(f"http://127.0.0.1:{PANEL_PORT}/sub/{user['sub_token']}?format=plain")
+        sub_txt = r_plain.text
+        check(r_plain.status_code == 200 and "vless://" in sub_txt and "@127.0.0.1:" in sub_txt,
+              "کانفیگ با آی‌پی تمیز ساخته شد", sub_txt.split("vless://")[-1][:40])
+        from urllib.parse import quote as _quote  # noqa: E402
+
+        check(_quote(location["name"] or "x", safe="") in sub_txt
+              and len([l for l in sub_txt.splitlines() if l.startswith("vless://")]) >= 1,
+              "نام کانفیگ شامل لوکیشن است", sub_txt.splitlines()[0].split("#")[-1][:50] if sub_txt else "")
+
+        # صفحه‌ی ساب: گروه‌بندی بر اساس لوکیشن
+        status_page = await client.get(f"http://127.0.0.1:{PANEL_PORT}/sub/{user['sub_token']}?stats=1")
+        page_data = status_page.json() if status_page.status_code == 200 else {}
+        groups = page_data.get("groups") or []
+        check(bool(groups) and all(("configs" in g and "index" in g) for g in groups),
+              "صفحه‌ی ساب کانفیگ‌ها را بر اساس لوکیشن جدا می‌کند", f"{len(groups)} گروه")
+
+        # ── ضدِ اسکن و بن‌نشدن ──
+        r_abuse = await client.get(f"http://127.0.0.1:{PANEL_PORT}/abuse")
+        check(r_abuse.status_code == 200 and "قوانین" in r_abuse.text and "گزارش سوءاستفاده" in r_abuse.text,
+              "صفحه‌ی قوانین/گزارش سوءاستفاده برای شکایت‌ها")
+        _, safety_json = await http_json(f"http://127.0.0.1:{PANEL_PORT}/api/site/safety", cookies=cookies)
+        check(safety_json.get("ok") and (safety_json.get("safety") or {}).get("rate_limit_per_min", 0) >= 60,
+              "محافظت ضدِ اسکنِ پنل فعال است", json_dumps(safety_json.get("safety")))
+        from panel.app import safety as _panel_safety  # noqa: E402
+
+        banned_probe = "198.51.100.9"
+        for _ in range(_panel_safety.PROBE_LIMIT + 2):
+            await _panel_safety.middleware(_FakeRequest(banned_probe, "/panel-not-a-real-path"), _fake_next)
+        check(_panel_safety.is_banned(banned_probe), "اسکنر مسیرهای ناموجود → بلاک موقت")
+        _panel_safety.unban(banned_probe)
+
+        # ── دکمه‌ی راه‌اندازی خودکار ──
+        r_plan = await client.get(f"http://127.0.0.1:{PANEL_PORT}/api/admin/auto-deploy/plan")
+        plan = (r_plan.json().get("plan") or {}) if r_plan.status_code == 200 else {}
+        regions = (r_plan.json().get("regions") or []) if r_plan.status_code == 200 else []
+        check(r_plan.status_code == 200 and plan.get("panel", {}).get("port") == 8080
+              and plan.get("panel", {}).get("root_directory") == "panel" and len(regions) >= 8,
+              "نقشه‌ی راه‌اندازی خودکار (سرویس‌ها + ریجن‌ها)", f"{len(regions)} ریجن")
+
+        anon = _httpx3.AsyncClient(timeout=10.0)
+        r_anon = await anon.post(f"http://127.0.0.1:{PANEL_PORT}/api/admin/auto-deploy/run",
+                                 json={"token": "x" * 20, "node_specs": []})
+        await anon.aclose()
+        check(r_anon.status_code in (401, 403), "دکمه‌ی راه‌اندازی خودکار فقط برای ادمین", f"HTTP {r_anon.status_code}")
+
+        r_bad = await client.post(f"http://127.0.0.1:{PANEL_PORT}/api/admin/auto-deploy/run",
+                                 json={"token": "bad-token-0000000000000000", "repo": "u/r", "wait": False,
+                                       "node_specs": [{"name": "Testland", "flag": "🏳️", "region": "europe-west4"}]})
+        bad = r_bad.json()
+        check(r_bad.status_code == 200 and bad.get("ok") is False and bool(bad.get("error"))
+              and any(s.get("level") == "error" for s in bad.get("steps", [])),
+              "خطای راه‌اندازی خودکار گویا و بدون کرش", str(bad.get("error"))[:60])
 
     # ── فایل‌های استقرار Xray ──
     check((ROOT / "node" / "nginx.conf.template").exists() and (ROOT / "node" / "start-xray.sh").exists(),

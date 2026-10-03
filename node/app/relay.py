@@ -10,6 +10,7 @@ from typing import Awaitable, Callable
 from . import settings
 from .egress import egress
 from .policy import policy
+from .safety import safety
 from .vless import CMD_TCP, CMD_UDP, RESPONSE_HEADER, NeedMoreData, VlessError, VlessRequest, parse_request
 
 BUFFER = settings.READ_BUFFER
@@ -181,6 +182,15 @@ async def read_vless_request(channel: ClientChannel, max_wait: float = 30.0) -> 
 async def run_tunnel(channel: ClientChannel, request: VlessRequest, ip: str = "?") -> None:
     """تونل کامل: احراز، محدودیت‌ها، پمپ دوطرفه."""
     uuid = request.uuid
+    if not safety.port_allowed(request.port):
+        policy.push_event(f"پورت {request.port} بلاک است ({ip})", "warn")
+        await channel.close("port blocked")
+        return
+    ip_ok, ip_reason = safety.note_connect(ip)
+    if not ip_ok:
+        policy.push_event(f"اتصال رد شد: {ip_reason} ({ip})", "warn")
+        await channel.close("rate limited")
+        return
     allowed, reason = policy.allow(uuid)
     if not allowed:
         policy.push_event(f"رد شد uuid={uuid[:8]} دلیل={reason}", "warn")

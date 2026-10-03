@@ -8,7 +8,7 @@ import httpx
 from fastapi import APIRouter, Cookie, HTTPException, Request
 from pydantic import BaseModel
 
-from . import nodeapi, orders, store
+from . import geoinfo, nodeapi, orders, store
 from .security import hash_password, verify_password
 from .settings import APP_VERSION
 
@@ -140,6 +140,8 @@ class LocationIn(BaseModel):
     decoy: str = ""
     egress_mode: str = "direct"
     egress: dict = {}
+    clean_ip: str = ""
+    clean_sni: str = ""
     enabled: bool = True
     sort: int = 0
     note: str = ""
@@ -674,3 +676,197 @@ async def egress_presets(mlp_sid: str | None = Cookie(default=None)):
              "egress": {"fallback": True}},
         ],
     }
+
+
+# ───────────────────────────── IP و موقعیت لوکیشن ─────────────────────────────
+async def _node_request(location: dict, path: str, timeout: float = 30.0) -> dict:
+    host = (location.get("host") or "").strip()
+    if not host:
+        raise HTTPException(status_code=400, detail="لوکیشن دامنه ندارد")
+    base = host if host.startswith("http") else f"https://{host}"
+    last_error = ""
+    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+        for candidate in (base, base.replace("https://", "http://", 1) if base.startswith("https://") else base):
+            url = f"{candidate.rstrip('/')}{path}"
+            url = f"{url}{'&' if '?' in url else '?'}key={location['token']}"
+            try:
+                resp = await client.get(url)
+            except Exception as exc:
+                last_error = type(exc).__name__
+                continue
+            if resp.status_code == 200:
+                try:
+                    return resp.json()
+                except Exception as exc:
+                    raise HTTPException(status_code=502, detail=f"پاسخ نود JSON نبود ({type(exc).__name__})")
+            last_error = f"HTTP {resp.status_code}"
+    raise HTTPException(status_code=502, detail=f"نود پاسخ نداد ({last_error or 'unreachable'})")
+
+
+@router.post("/locations/{lid}/geo")
+async def location_geo(lid: int, mlp_sid: str | None = Cookie(default=None)):
+    """IP و موقعیت واقعی خروجی این لوکیشن را از خود نود می‌پرسد."""
+    require_admin(mlp_sid)
+    location = store.get_location(lid)
+    if not location:
+        raise HTTPException(status_code=404, detail="لوکیشن پیدا نشد")
+    try:
+        data = await _node_request(location, "/healthz", timeout=20.0)
+        geo = data.get("geo") or {}
+        if geo.get("ip"):
+            store.save_location_geo(lid, geo)
+            store.log_event("location", f"IP لوکیشن «{location['name']}»: {geo['ip']} {geo.get('flag', '')}", "info")
+            return {"ok": True, "geo": geo}
+        raise HTTPException(status_code=502, detail="نود موقعیت را برنگرداند")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"نود در دسترس نبود ({type(exc).__name__})")
+
+
+class GeoApplyIn(BaseModel):
+    set_flag: bool = True
+    set_region: bool = False
+
+
+@router.post("/locations/{lid}/apply-geo")
+async def location_apply_geo(lid: int, body: GeoApplyIn, mlp_sid: str | None = Cookie(default=None)):
+    """فلگ/کشور لوکیشن را از IP واقعی خروجی پر می‌کند."""
+    require_admin(mlp_sid)
+    location = store.get_location(lid)
+    if not location:
+        raise HTTPException(status_code=404, detail="لوکیشن پیدا نشد")
+    data: dict = {}
+    if body.set_flag and location.get("geo_flag"):
+        data["flag"] = location["geo_flag"]
+    if body.set_region and location.get("geo_city"):
+        data["region"] = f"{location['geo_city']} · {location.get('geo_country') or ''}".strip(" ·")
+    if not data:
+        raise HTTPException(status_code=400, detail="چیزی برای اعمال نیست (اول «IP من» را بزن)")
+    merged = {**location, **data, "egress": store.location_egress(location),
+              "egress_mode": location.get("egress_mode") or "direct",
+              "clean_ip": location.get("clean_ip") or "", "clean_sni": location.get("clean_sni") or ""}
+    store.save_location(merged)
+    return {"ok": True, "location": store.get_location(lid)}
+
+
+async def orders_refresh_locations() -> None:
+    return None
+
+
+# ───────────────────────────── اسکنر ─────────────────────────────
+class ScanIn(BaseModel):
+    hosts: str = ""
+    port: int = 443
+    tls: bool = True
+    attempts: int = 3
+
+
+@router.post("/locations/{lid}/scan")
+async def location_scan(lid: int, body: ScanIn, mlp_sid: str | None = Cookie(default=None)):
+    """اسکن آی‌پی/هاست‌های کاندید از روی نود (برای پیدا کردن خروجی تمیز و سریع)."""
+    require_admin(mlp_sid)
+    location = store.get_location(lid)
+    if not location:
+        raise HTTPException(status_code=404, detail="لوکیشن پیدا نشد")
+    hosts = [h.strip() for h in body.hosts.replace("\n", ",").split(",") if h.strip()]
+    if not hosts:
+        raise HTTPException(status_code=400, detail="لیست آی‌پی/هاست خالی است")
+    query = f"/scan?hosts={','.join(hosts[:128])}&port={int(body.port)}&tls={1 if body.tls else 0}&attempts={int(body.attempts)}"
+    try:
+        data = await _node_request(location, query, timeout=90.0)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"نود در دسترس نبود ({type(exc).__name__})")
+    best = data.get("best") or {}
+    if best.get("host"):
+        store.execute(
+            "UPDATE locations SET clean_ip=?, clean_sni=? WHERE id=?",
+            (best["host"], (location.get("host") or "").split(":")[0], int(lid)),
+        )
+        store.log_event("scanner", f"بهترین خروجی برای «{location['name']}»: {best['host']} ({best.get('latency_ms')}ms)", "ok")
+    return {"ok": True, "scan": data, "clean_ip": store.get_location(lid, )}
+
+
+@router.get("/locations/{lid}/clean-ip")
+async def location_clean_ip(lid: int, mlp_sid: str | None = Cookie(default=None)):
+    require_admin(mlp_sid)
+    location = store.get_location(lid)
+    if not location:
+        raise HTTPException(status_code=404, detail="لوکیشن پیدا نشد")
+    return {"ok": True, "clean_ip": location.get("clean_ip") or "", "host": location.get("host") or ""}
+
+
+# ───────────────────────────── راه‌اندازی خودکار (Railway) ─────────────────────────────
+class AutoDeployIn(BaseModel):
+    token: str = ""
+    repo: str = ""
+    branch: str = "main"
+    project_name: str = ""
+    workspace_id: str = ""
+    admin_password: str = ""
+    node_specs: list[dict] = []
+    wait: bool = True
+
+
+@router.get("/auto-deploy/plan")
+async def auto_deploy_plan(repo: str = "", mlp_sid: str | None = Cookie(default=None)):
+    require_admin(mlp_sid)
+    from . import railway
+
+    saved = store.get_setting("auto_deploy_repo") or ""
+    configured = store.get_setting("auto_deploy_token") or ""
+    return {
+        "ok": True,
+        "plan": railway.deploy_plan(repo or saved),
+        "has_token": bool(configured),
+        "saved_repo": saved,
+        "regions": geoinfo.REGION_CHOICES,
+        "existing": store.all_settings().get("auto_deploy_result", ""),
+        "ssh_note": "بدون توکن هم می‌توانی سرویس‌ها را دستی بسازی؛ ولی با توکن، همه‌چیز خودکار ساخته می‌شود.",
+    }
+
+
+@router.get("/auto-deploy/verify")
+async def auto_deploy_verify(token: str = "", mlp_sid: str | None = Cookie(default=None)):
+    """توکن Railway را چک می‌کند و نام حساب را برمی‌گرداند (بدون ذخیره)."""
+    require_admin(mlp_sid)
+    from . import railway
+
+    stored = store.get_setting("auto_deploy_token") or ""
+    try:
+        async with railway.Railway(token or stored) as client:
+            me = await client.me()
+        return {"ok": True, "account": me.get("email") or me.get("name") or "ok"}
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"توکن پذیرفته نشد ({type(exc).__name__})")
+
+
+@router.post("/auto-deploy/run")
+async def auto_deploy_run(body: AutoDeployIn, mlp_sid: str | None = Cookie(default=None)):
+    """دکمه‌ی جادویی: با توکن Railway همه‌چیز را می‌سازد."""
+    require_admin(mlp_sid)
+    from . import railway
+
+    token = (body.token or store.get_setting("auto_deploy_token") or "").strip()
+    if not token:
+        raise HTTPException(status_code=400, detail="توکن Railway لازم است")
+    repo = body.repo or store.get_setting("auto_deploy_repo") or railway.DEFAULT_REPO
+    node_specs = [s for s in (body.node_specs or []) if isinstance(s, dict) and s.get("name")]
+    public = store.public_base()
+    store.set_setting("auto_deploy_token", token)
+    store.set_setting("auto_deploy_repo", repo)
+    store.log_event("deploy", "راه‌اندازی خودکار روی Railway شروع شد", "info")
+    result = await railway.auto_deploy(
+        token, repo=repo, branch=body.branch or "main", project_name=body.project_name,
+        workspace_id=body.workspace_id, admin_password=body.admin_password,
+        node_specs=node_specs or None, panel_url=public, wait=bool(body.wait),
+    )
+    store.set_setting("auto_deploy_result", railway.to_json({
+        "at": store.now_iso(), "project": result.get("project"),
+        "panel_url": result.get("panel_url"), "ok": result.get("ok"),
+    }))
+    level = "ok" if result.get("ok") else "error"
+    store.log_event("deploy", f"راه‌اندازی خودکار: {'موفق' if result.get('ok') else 'ناموفق'}", level)
+    return result

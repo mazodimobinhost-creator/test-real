@@ -203,6 +203,16 @@ def _ensure_columns() -> None:
             "decoy": "TEXT NOT NULL DEFAULT ''",
             "egress_mode": "TEXT NOT NULL DEFAULT 'direct'",
             "egress_json": "TEXT NOT NULL DEFAULT '{}'",
+            "clean_ip": "TEXT NOT NULL DEFAULT ''",
+            "clean_sni": "TEXT NOT NULL DEFAULT ''",
+            "geo_ip": "TEXT NOT NULL DEFAULT ''",
+            "geo_country_code": "TEXT NOT NULL DEFAULT ''",
+            "geo_country": "TEXT NOT NULL DEFAULT ''",
+            "geo_flag": "TEXT NOT NULL DEFAULT ''",
+            "geo_city": "TEXT NOT NULL DEFAULT ''",
+            "geo_isp": "TEXT NOT NULL DEFAULT ''",
+            "geo_via": "TEXT NOT NULL DEFAULT ''",
+            "geo_at": "INTEGER NOT NULL DEFAULT 0",
         },
         "plans": {"reseller_price": "INTEGER NOT NULL DEFAULT 0"},
     }
@@ -344,6 +354,27 @@ def location_egress(location: dict) -> dict:
     return conf
 
 
+def save_location_geo(location_id: int, geo: dict) -> None:
+    """ذخیره‌ی IP/موقعیت گزارش‌شده از نود."""
+    if not geo:
+        return
+    execute(
+        """UPDATE locations SET geo_ip=?, geo_country_code=?, geo_country=?, geo_flag=?,
+           geo_city=?, geo_isp=?, geo_via=?, geo_at=? WHERE id=?""",
+        (
+            str(geo.get("ip") or "")[:64],
+            str(geo.get("country_code") or "")[:4],
+            str(geo.get("country") or "")[:64],
+            str(geo.get("flag") or "")[:8],
+            str(geo.get("city") or "")[:64],
+            str(geo.get("isp") or "")[:80],
+            str(geo.get("via") or "")[:80],
+            int(geo.get("checked_at") or now_ts()),
+            int(location_id),
+        ),
+    )
+
+
 def list_locations(only_enabled: bool = False) -> list[dict]:
     sql = "SELECT * FROM locations"
     if only_enabled:
@@ -380,6 +411,8 @@ def save_location(data: dict) -> int:
         "decoy": str(data.get("decoy") or "").strip().lower()[:12],
         "egress_mode": str(data.get("egress_mode") or "direct").strip().lower()[:12],
         "egress_json": json.dumps(data.get("egress") or {}, ensure_ascii=False)[:4000],
+        "clean_ip": str(data.get("clean_ip") or "").strip()[:80],
+        "clean_sni": str(data.get("clean_sni") or "").strip()[:120],
         "enabled": 1 if data.get("enabled", True) else 0,
         "sort": int(data.get("sort") or 0),
         "note": str(data.get("note") or "")[:400],

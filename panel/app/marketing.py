@@ -64,7 +64,7 @@ def _shell(brand: dict, title: str, body: str, extra_head: str = "") -> str:
         bar = f'<div class="bar">{html.escape(brand["announce_bar"])}</div>'
     nav = (
         '<a href="/">خانه</a><a href="/plans">تعرفه‌ها</a><a href="/status">وضعیت سرویس</a>'
-        '<a href="/download">راهنمای اتصال</a><a href="/contact">تماس</a>'
+        '<a href="/download">راهنمای اتصال</a><a href="/contact">تماس</a><a href="/abuse">قوانین</a>'
     )
     return f"""<!doctype html><html lang="fa" dir="rtl"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -229,8 +229,38 @@ setInterval(function(){ s = Math.max(0, s - 1);
     return _shell(brand, "بروزرسانی", body)
 
 
+def abuse_page(brand: dict) -> str:
+    contact = html.escape(brand.get("contact") or "")
+    body = f"""<section><div class="wrap"><h2 class="sec">قوانین استفاده و گزارش سوءاستفاده</h2>
+  <div class="card" style="margin-bottom:14px">
+    <h3>این سرویس برای چه کاری است؟</h3>
+    <p class="mut">دسترسی امن و شخصی به اینترنت، با رمزنگاری استاندارد. استفاده‌ی تجاری، سازمانی و «ارائه به دیگران»
+    فقط با تأیید پشتیبانی مجاز است.</p>
+  </div>
+  <div class="grid g2">
+    <div class="card"><h3>❌ کارهای غیرمجاز</h3><ul class="mut" style="padding-inline-start:18px">
+      <li>ارسال ایمیل انبوه (پورت‌های SMTP بسته است)</li>
+      <li>اسکن پورت، حمله به سرورهای دیگر و هرگونه فعالیت مخرب</li>
+      <li>تورنت و دانلود فایل‌های دارای حق نشر</li>
+      <li>کلاهبرداری، فیشینگ و انتشار محتوای غیرقانونی</li>
+    </ul></div>
+    <div class="card"><h3>🛡 محافظت‌های فعال</h3><ul class="mut" style="padding-inline-start:18px">
+      <li>بلاک پورت‌های پرخطر (SMTP/SMB/IRC و…)</li>
+      <li>محدودسازی نرخ اتصال و شناسایی رفتار اسکنر</li>
+      <li>سقف حجم، انقضا و تعداد دستگاه برای هر کاربر</li>
+      <li>لاگ رویدادها برای پیگیری سوءاستفاده</li>
+    </ul></div>
+  </div>
+  <div class="card" style="margin-top:14px"><h3>📮 گزارش سوءاستفاده</h3>
+    <p class="mut">اگر استفاده‌ی نامناسبی از این سرویس دیدی، به پشتیبانی اطلاع بده؛ در سریع‌ترین زمان بررسی و
+    حساب متخلف محدود می‌شود.</p>
+    {'<a class="btn" href="' + contact + '">تماس با پشتیبانی</a>' if contact else ''}
+  </div></div></section>"""
+    return _shell(brand, "قوانین استفاده", body)
+
+
 def robots_txt(brand: dict) -> str:
-    return "User-agent: *\nAllow: /\nDisallow: /api/\nDisallow: /sub/\n"
+    return "User-agent: *\nAllow: /$\nAllow: /plans\nAllow: /status\nAllow: /download\nAllow: /contact\nAllow: /abuse\nDisallow: /api/\nDisallow: /sub/\n"
 
 
 def sitemap_xml(base: str) -> str:

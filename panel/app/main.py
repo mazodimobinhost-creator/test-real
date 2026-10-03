@@ -18,13 +18,14 @@ import logging
 from fastapi import Cookie, FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response
 
-from . import adminapi, bot, marketing, nodeapi, store, subpage, tutorial, ui
+from . import adminapi, bot, marketing, nodeapi, safety, store, subpage, tutorial, ui
 from .settings import APP_NAME, APP_TITLE_FA, APP_VERSION, NODE_SYNC_INTERVAL
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("mlp.panel")
 
 app = FastAPI(title=APP_NAME, version=APP_VERSION, docs_url=None, redoc_url=None)
+app.middleware("http")(safety.middleware)
 app.include_router(adminapi.router)
 app.include_router(nodeapi.router)
 
@@ -96,6 +97,17 @@ async def favicon():
 @app.get("/robots.txt", response_class=PlainTextResponse)
 async def robots():
     return marketing.robots_txt(store.brand())
+
+
+@app.get("/abuse", response_class=HTMLResponse)
+async def abuse_page():
+    """صفحه‌ی قوانین و گزارش سوءاستفاده — جلوی شکایت‌ها و بن‌شدن را می‌گیرد."""
+    return HTMLResponse(marketing.abuse_page(store.brand()))
+
+
+@app.get("/api/site/safety")
+async def safety_status():
+    return {"ok": True, "safety": safety.status()}
 
 
 @app.get("/sitemap.xml")

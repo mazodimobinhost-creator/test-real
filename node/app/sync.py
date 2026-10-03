@@ -8,6 +8,7 @@ import logging
 import httpx
 
 from . import decoy, settings
+from .geo import cached as geo_cached
 from .egress import egress
 from .policy import policy
 
@@ -55,7 +56,12 @@ async def sync_once() -> bool:
         return False
     url = f"{settings.PANEL_URL}/api/node/sync"
     try:
-        payload = {"status": policy.status(), "version": settings.APP_VERSION, "egress": egress.status()}
+        payload = {
+            "status": policy.status(),
+            "version": settings.APP_VERSION,
+            "egress": egress.status(),
+            "geo": geo_cached(),
+        }
         resp = await http().post(url, json=payload)
         if resp.status_code != 200:
             _last_error = f"HTTP {resp.status_code}: {resp.text[:160]}"
@@ -108,6 +114,7 @@ async def report_once() -> bool:
         "status": policy.status(),
         "events": policy.drain_events(),
         "egress": egress.status(),
+        "geo": geo_cached(),
     }
     try:
         resp = await http().post(f"{settings.PANEL_URL}/api/node/report", json=payload)

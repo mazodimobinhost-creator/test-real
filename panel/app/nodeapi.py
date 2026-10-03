@@ -11,7 +11,7 @@ from typing import Any
 
 from fastapi import APIRouter, Header, HTTPException, Request
 
-from . import store
+from . import geoinfo, store
 from .security import const_time_eq
 from .settings import APP_VERSION, NODE_SYNC_INTERVAL
 
@@ -70,6 +70,10 @@ async def node_sync(request: Request, authorization: str = Header(default=""), x
         store.touch_location(location["id"], status)
     else:
         store.touch_location(location["id"])
+    geo = payload.get("geo")
+    if isinstance(geo, dict) and geo.get("ip"):
+        store.save_location_geo(int(location["id"]), geo)
+        location = store.get_location(int(location["id"])) or location
 
     settings = store.all_settings()
     base = store.public_base()
@@ -91,6 +95,14 @@ async def node_sync(request: Request, authorization: str = Header(default=""), x
             "tcp_port": int(location["tcp_port"] or 0),
             "engine": location.get("engine") or "python",
             "decoy": location.get("decoy") or "",
+            "clean_ip": location.get("clean_ip") or "",
+            "region_hint": geoinfo.railway_region_hint(location.get("region") or ""),
+            "geo": {
+                "ip": location.get("geo_ip") or "",
+                "country_code": location.get("geo_country_code") or "",
+                "flag": location.get("geo_flag") or "",
+                "city": location.get("geo_city") or "",
+            },
             "egress": store.location_egress(location),
         },
         "panel": {
@@ -132,6 +144,9 @@ async def node_report(request: Request, authorization: str = Header(default=""),
         store.touch_location(location["id"], status)
     else:
         store.touch_location(location["id"])
+    geo = payload.get("geo")
+    if isinstance(geo, dict) and geo.get("ip"):
+        store.save_location_geo(int(location["id"]), geo)
 
     for event in (payload.get("events") or [])[:20]:
         if isinstance(event, dict):

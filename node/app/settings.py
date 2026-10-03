@@ -87,6 +87,26 @@ def chain_config() -> dict:
     }
 
 
+# ── تشخیص IP و موقعیت (برای نمایش در پنل) ──
+GEO_ENABLED = (os.environ.get("MLP_GEO_ENABLED") or "1").strip() not in ("0", "false", "no")
+GEO_INTERVAL = float(os.environ.get("MLP_GEO_INTERVAL", "900"))
+GEO_URL = (os.environ.get("MLP_GEO_URL") or "").strip()      # آدرس سفارشی (برای تست/سرویس داخلی)
+
+# ── محافظت (ضد بن/سوءاستفاده) ──
+BLOCK_PORTS = {
+    int(x)
+    for x in (os.environ.get("MLP_BLOCK_PORTS") or "25,465,587,6667,6697,137,138,139,445,1900,11211").replace(" ", "").split(",")
+    if x.strip().isdigit()
+}
+MAX_CONN_PER_IP_MIN = int(os.environ.get("MLP_MAX_CONN_PER_IP_MIN", "90"))
+MAX_CONN = int(os.environ.get("MLP_MAX_CONN", "1200"))
+PROBE_BAN_AFTER = int(os.environ.get("MLP_PROBE_BAN_AFTER", "40"))
+BAN_SECONDS = int(os.environ.get("MLP_BAN_SECONDS", "600"))
+
+# ── اسکنر ──
+SCAN_TIMEOUT = float(os.environ.get("MLP_SCAN_TIMEOUT", "3"))
+SCAN_ATTEMPTS = int(os.environ.get("MLP_SCAN_ATTEMPTS", "3"))
+
 # بهینه‌سازی: اندازه‌ی بافر خواندن و آستانه‌ی درین تطبیقی
 READ_BUFFER = int(os.environ.get("MLP_READ_BUFFER", str(128 * 1024)))
 DRAIN_HIGH_WATER = int(os.environ.get("MLP_DRAIN_HIGH_WATER", str(2 * 1024 * 1024)))

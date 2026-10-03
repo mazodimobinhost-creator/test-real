@@ -326,6 +326,9 @@ async def main() -> int:
             token = line.split("=", 1)[1]
     check(resp.status_code == 200 and bool(token), "ساخت لوکیشن + توکن نود", location.get("name", ""))
 
+    # geo در همه‌ی نودهای تست خاموش است تا نتیجه‌ی تست به اینترنت محیط وابسته نباشد
+    os.environ["MLP_GEO_ENABLED"] = "0"
+
     # ── اجرای نود ──
     node_env = os.environ.copy()
     node_env.update(

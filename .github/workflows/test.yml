@@ -24,4 +24,22 @@ jobs:
       - name: end-to-end test (panel + node + real VLESS client)
         run: |
           python -c "import websockets, httpx, fastapi, uvicorn; print('deps ok')"
-          python tools/e2e_test.py
+          set +e
+          python -u tools/e2e_test.py > /tmp/e2e.raw 2>&1
+          code=$?
+          tr -d '\000' < /tmp/e2e.raw | sed 's/\x1b\[[0-9;]*m//g' > /tmp/e2e.log || true
+          if [ $code -ne 0 ]; then
+            {
+              echo "### ❌ خروجی تست e2e (خطاها)"
+              echo '```'
+              grep -nE "FAIL|Traceback|Error|Exception|نتیجه:" /tmp/e2e.log | tail -60 || true
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            grep -E "FAIL" /tmp/e2e.log | head -20 | while IFS= read -r line; do
+              echo "::error title=e2e FAIL::$line"
+            done
+            tail -80 /tmp/e2e.log
+          else
+            grep -E "نتیجه:" /tmp/e2e.log || true
+          fi
+          exit $code

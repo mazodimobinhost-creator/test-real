@@ -11,6 +11,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app ./app
+COPY setup_files.json ./setup_files.json
 RUN mkdir -p /data
 
 EXPOSE 8080

@@ -24,6 +24,13 @@ import uuid as uuid_lib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+
+
+def json_dumps(obj) -> str:
+    import json as _json
+
+    return _json.dumps(obj, ensure_ascii=False)
 PY = sys.executable
 VENV_PY = Path("/tmp/venv/bin/python")
 if VENV_PY.exists():
@@ -194,6 +201,7 @@ async def main() -> int:
             "MLP_NODE_NAME": "LocalTest",
             "MLP_WS_PATH": "/ws",
             "MLP_XHTTP_PATH": "/xhttp",
+            "MLP_DECOY": "auto",
             "MLP_SYNC_INTERVAL": "3",
             "MLP_REPORT_INTERVAL": "3",
             "PORT": str(NODE_PORT),
@@ -219,7 +227,9 @@ async def main() -> int:
     await asyncio.sleep(5)  # اولین sync
 
     # ── وضعیت اتصال نود به پنل ──
-    _, hz = await http_json(f"http://127.0.0.1:{NODE_PORT}/healthz")
+    _, hz_plain = await http_json(f"http://127.0.0.1:{NODE_PORT}/healthz")
+    _, hz = await http_json(f"http://127.0.0.1:{NODE_PORT}/healthz?key={token}")
+    check(hz_plain == {"status": "ok"}, "پاسخ عمومی /healthz بی‌اثر است")
     check(bool(hz.get("panel_ok")), "نود با توکن به پنل وصل شد", f"users={hz.get('clients')}")
 
     # ── ساخت کاربر ──
@@ -233,8 +243,8 @@ async def main() -> int:
     check(resp.status_code == 200 and bool(user.get("uuid")), "ساخت کاربر", user.get("name", ""))
 
     await asyncio.sleep(5)  # sync دوم تا کاربر روی نود بیاید
-    _, hz = await http_json(f"http://127.0.0.1:{NODE_PORT}/healthz")
-    check(int(hz.get("clients") or 0) >= 1, "کاربر روی نود دیده شد", f"clients={hz.get('clients')}")
+    _, hz_client = await http_json(f"http://127.0.0.1:{NODE_PORT}/healthz?key={token}")
+    check(int(hz_client.get("clients") or 0) >= 1, "کاربر روی نود دیده شد", f"clients={hz_client.get('clients')}")
 
     # ── تست واقعی تونل ──
     # مقصد تست: خود پنل روی 127.0.0.1 (در سندباکس دسترسی به اینترنت بیرونی بسته است)
@@ -363,6 +373,261 @@ async def main() -> int:
         check("HTTP/" in text_x, "تونل XHTTP داده برگرداند", text_x.split("\r\n")[0][:50] if text_x else "بدون پاسخ")
     except Exception as exc:
         check(False, "تونل XHTTP", f"{type(exc).__name__}: {exc}")
+
+
+    # ── سایت عمومی (پوششی) و صفحات ──
+    print(f"{YELLOW}==> تست سایت عمومی و صفحات{RESET}")
+    import httpx as _httpx2
+
+    async with _httpx2.AsyncClient(timeout=15.0, follow_redirects=False) as client:
+        home = await client.get(f"http://127.0.0.1:{PANEL_PORT}/")
+        pages = {}
+        for path in ("/plans", "/status", "/download", "/contact", "/api/site", "/robots.txt", "/sitemap.xml"):
+            pages[path] = await client.get(f"http://127.0.0.1:{PANEL_PORT}{path}")
+        unknown = await client.get(f"http://127.0.0.1:{PANEL_PORT}/this-page-does-not-exist")
+        go = await client.get(f"http://127.0.0.1:{PANEL_PORT}/go")
+        node_home = await client.get(f"http://127.0.0.1:{NODE_PORT}/")
+        node_inner = await client.get(f"http://127.0.0.1:{NODE_PORT}/about?ref=nav")
+        node_missing = await client.get(f"http://127.0.0.1:{NODE_PORT}/no-such-path")
+        node_cfg = await client.get(f"http://127.0.0.1:{NODE_PORT}/_mlp/config.js")
+        hz_public = await client.get(f"http://127.0.0.1:{NODE_PORT}/healthz")
+        hz_private = await client.get(f"http://127.0.0.1:{NODE_PORT}/healthz?key={token}")
+
+    import sqlite3  # noqa: E402
+
+    _db = sqlite3.connect(str(data_dir / "mlp.sqlite3"))
+    secret = _db.execute("SELECT value FROM settings WHERE key='secret_path'").fetchone()[0]
+    _db.close()
+    check(home.status_code == 200 and "<html" in home.text.lower(), "صفحه‌ی اصلی سایت عمومی")
+    check(all(r.status_code == 200 for r in pages.values()),
+          "همه‌ی صفحات سایت و sitemap/robots", ",".join(f"{k}:{v.status_code}" for k, v in pages.items()))
+    check("تعرفه" in pages["/plans"].text or "plan" in pages["/plans"].text.lower(),
+          "صفحه تعرفه‌ها محتوا دارد")
+    check(unknown.status_code == 404 and "<html" in unknown.text.lower(), "مسیر ناشناخته → صفحه ۴۰۴ سایت")
+    check(go.status_code in (302, 307) and go.headers.get("location") == secret, "میان‌بر /go به مسیر مخفی پنل")
+    check(hz_public.status_code == 200 and hz_public.json() == {"status": "ok"},
+          "نود بدون کلید اطلاعات لو نمی‌دهد")
+    check(hz_private.status_code == 200 and hz_private.json().get("role") == "node",
+          "نود با کلید وضعیت کامل می‌دهد")
+    check(node_cfg.status_code == 200 and "__APP_CONFIG__" in node_cfg.text, "فایل پیکربندی سایت پوششی نود")
+
+    # سایت پوششی نود نباید شبیه پروکسی باشد
+    body = node_home.text if node_home.status_code == 200 else ""
+    looks_like_site = (
+        node_home.status_code == 200
+        and "<html" in body.lower()
+        and not any(word in body.lower() for word in ("vless", "uuid", "panel", "xray", "subscription"))
+        and ("<!doctype html>" in body.lower() or "<html" in body.lower())
+    )
+    check(looks_like_site, "نود سایت پوششی واقعی نشان می‌دهد (بدون اثری از پروکسی)",
+          f"len={len(body)} kind={os.environ.get('MLP_DECOY', 'auto')}")
+    check(node_inner.status_code == 200 and len(node_inner.text) > 500, "مسیر داخلی سایت پوششی هم پاسخ می‌دهد")
+    check(node_missing.status_code == 404 and "<html" in node_missing.text.lower(), "۴۰۴ سایت پوششی نود")
+
+    # دو نود با نام‌های مختلف نباید سایت یکسان داشته باشند (انتخاب پایدار از نام)
+    from node.app import decoy as node_decoy  # noqa: E402
+
+    _prev_env = {k: os.environ.get(k) for k in ("MLP_DECOY", "MLP_NODE_NAME", "RAILWAY_PUBLIC_DOMAIN")}
+    try:
+        os.environ["MLP_DECOY"] = "shop"
+        forced_shop = node_decoy.choose_kind()
+        os.environ["MLP_DECOY"] = "blog"
+        forced_blog = node_decoy.choose_kind()
+        os.environ["MLP_DECOY"] = "none"
+        forced_none = node_decoy.choose_kind()
+        os.environ.pop("MLP_DECOY", None)
+        os.environ["MLP_NODE_NAME"] = "NodeA"
+        a1, a2 = node_decoy.choose_kind(), node_decoy.choose_kind()
+        os.environ["MLP_NODE_NAME"] = "NodeB"
+        b1 = node_decoy.choose_kind()
+    finally:
+        for k, v in _prev_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+    check((forced_shop, forced_blog, forced_none) == ("shop", "blog", "none"), "انتخاب دستی سایت پوششی (shop/blog/none)")
+    check(a1 == a2 and a1 in node_decoy.SITE_KINDS, "انتخاب سایت پوششی پایدار بر اساس نام نود", a1)
+    check(b1 in node_decoy.SITE_KINDS, "نام دیگر نود هم سایت معتبر می‌سازد", b1)
+
+    # ── برند اختصاصی ──
+    print(f"{YELLOW}==> تست برند و ظاهر اختصاصی{RESET}")
+    brand_name = "آزمایش‌سرا"
+    resp, brand_resp = await http_json(
+        f"http://127.0.0.1:{PANEL_PORT}/api/admin/settings", "POST",
+        {"brand_name": brand_name, "brand_slogan": "شعار تست", "brand_hero": "تیتر تست",
+         "brand_features": "ویژگی یک\nویژگی دو", "brand_color": "#12b8a6", "brand_color2": "#ff7a59"},
+        cookies,
+    )
+    async with _httpx2.AsyncClient(timeout=15.0) as client:
+        home2 = await client.get(f"http://127.0.0.1:{PANEL_PORT}/")
+        site2 = await client.get(f"http://127.0.0.1:{PANEL_PORT}/api/site")
+    check(resp.status_code == 200 and brand_name in home2.text, "نام برند روی سایت عمومی اعمال شد")
+    check("#12b8a6" in home2.text, "رنگ اختصاصی برند در CSS سایت")
+    check(brand_name in site2.text and "تیتر تست" in site2.text, "API سایت برند را برمی‌گرداند")
+
+    # ── اعلان‌ها ──
+    resp, ann = await http_json(
+        f"http://127.0.0.1:{PANEL_PORT}/api/admin/announcements", "POST",
+        {"title": "خبر مهم", "body": "امشب بروزرسانی داریم", "level": "warn", "enabled": True}, cookies,
+    )
+    ann_id = (ann.get("announcement") or {}).get("id")
+    await http_json(f"http://127.0.0.1:{PANEL_PORT}/api/admin/settings", "POST", {"announce_bar": "۱۰٪ تخفیف"}, cookies)
+    async with _httpx2.AsyncClient(timeout=15.0) as client:
+        home3 = await client.get(f"http://127.0.0.1:{PANEL_PORT}/")
+    check(bool(ann_id) and "خبر مهم" in home3.text, "اعلان در سایت عمومی دیده می‌شود")
+    check("۱۰٪ تخفیف" in home3.text, "نوار اعلان بالای سایت")
+    _, anns = await http_json(f"http://127.0.0.1:{PANEL_PORT}/api/admin/announcements", cookies=cookies)
+    check(any(a["id"] == ann_id for a in anns.get("announcements", [])), "اعلان در API پنل هست")
+
+    # ── حالت‌های سایت ──
+    await http_json(f"http://127.0.0.1:{PANEL_PORT}/api/admin/settings", "POST", {"site_mode": "countdown"}, cookies)
+    async with _httpx2.AsyncClient(timeout=15.0) as client:
+        cd = await client.get(f"http://127.0.0.1:{PANEL_PORT}/")
+        cd_unknown = await client.get(f"http://127.0.0.1:{PANEL_PORT}/some-random")
+    check("به‌زودی برمی‌گردیم" in cd.text and cd_unknown.status_code == 200, "حالت «به‌زودی» سایت")
+    await http_json(f"http://127.0.0.1:{PANEL_PORT}/api/admin/settings", "POST", {"site_mode": "marketing"}, cookies)
+
+    # ── رزیلر و کیف پول ──
+    print(f"{YELLOW}==> تست رزیلر و کیف پول{RESET}")
+    resp, rs = await http_json(
+        f"http://127.0.0.1:{PANEL_PORT}/api/admin/resellers", "POST",
+        {"name": "رزیلر تست", "username": "reseller1", "password": "pass123", "price_gb": 1500,
+         "price_day": 200, "min_gb": 1, "note": "5551234"}, cookies,
+    )
+    reseller = rs.get("reseller") or {}
+    check(resp.status_code == 200 and reseller.get("id") and "password_hash" not in reseller,
+          "ساخت رزیلر (بدون افشای رمز)")
+    r_id = reseller.get("id")
+    resp, top = await http_json(
+        f"http://127.0.0.1:{PANEL_PORT}/api/admin/resellers/topup", "POST",
+        {"reseller_id": r_id, "amount": 500000, "note": "شارژ دستی"}, cookies,
+    )
+    check(resp.status_code == 200 and (top.get("balance") or 0) == 500000, "شارژ کیف پول رزیلر", f"balance={top.get('balance')}")
+    _, wl = await http_json(f"http://127.0.0.1:{PANEL_PORT}/api/admin/wallet", cookies=cookies)
+    check(any(t["status"] == "approved" and t["amount"] == 500000 for t in wl.get("txs", [])), "تراکنش در دفتر کیف پول")
+
+    # رزیلر با موجودی کم نمی‌تواند خرید کند
+    from panel.app.bot import _reseller_buy_plan  # noqa: E402
+
+    resp, plan = await http_json(
+        f"http://127.0.0.1:{PANEL_PORT}/api/admin/plans", "POST",
+        {"name": "پلن رزیلری", "traffic_gb": 10, "days": 30, "price": "۲۰۰ هزار", "reseller_price": 0,
+         "max_ips": 0, "speed_kbps": 0, "enabled": True}, cookies,
+    )
+    plan_id = (plan.get("plan") or {}).get("id")
+    computed = 10 * int(reseller["price_gb"]) + 30 * int(reseller["price_day"])
+    check(computed == 21000, "قیمت‌گذاری خودکار رزیلر (حجم/روز)", f"{computed:,} تومان")
+    _, users_before = await http_json(f"http://127.0.0.1:{PANEL_PORT}/api/admin/users", cookies=cookies)
+    rs_row = [r for r in (await http_json(f"http://127.0.0.1:{PANEL_PORT}/api/admin/resellers", cookies=cookies))[1]["resellers"]
+              if r["id"] == r_id][0]
+    await _reseller_buy_plan(999999, dict(rs_row, balance=100), plan_id)   # موجودی کم → نباید کاربر بسازد
+    _, users_after = await http_json(f"http://127.0.0.1:{PANEL_PORT}/api/admin/users", cookies=cookies)
+    check(len(users_after.get("users", [])) == len(users_before.get("users", [])),
+          "رزیلر بدون موجودی کافی کاربر نمی‌سازد")
+
+    # کاربر زیرمجموعه رزیلر در پنل دیده شود
+    resp, ruser = await http_json(
+        f"http://127.0.0.1:{PANEL_PORT}/api/admin/users", "POST",
+        {"name": "کاربر رزیلر", "limit_gb": 2, "days": 30, "reseller_id": r_id, "enabled": True}, cookies,
+    )
+    r_user = ruser.get("user") or {}
+    _, ulist = await http_json(f"http://127.0.0.1:{PANEL_PORT}/api/admin/users", cookies=cookies)
+    row = [u for u in ulist.get("users", []) if u["id"] == r_user.get("id")]
+    check(bool(row) and row[0].get("reseller_name") == "رزیلر تست", "کاربر رزیلر با نام رزیلر در پنل")
+
+    # ── مسیر ساب اختصاصی ──
+    print(f"{YELLOW}==> تست مسیر ساب و دامنه{RESET}")
+    import base64  # noqa: E402
+
+    tok = r_user.get("sub_token", "")
+    async with _httpx2.AsyncClient(timeout=15.0) as client:
+        sub_a = await client.get(f"http://127.0.0.1:{PANEL_PORT}/sub/{tok}", headers={"User-Agent": "v2rayNG/1.8"})
+        sub_stats = await client.get(f"http://127.0.0.1:{PANEL_PORT}/sub/{tok}?stats=1")
+        sub_html = await client.get(f"http://127.0.0.1:{PANEL_PORT}/sub/{tok}",
+                                    headers={"User-Agent": "Mozilla/5.0", "Accept": "text/html"})
+    check(sub_a.status_code == 200 and "vless://" in base64.b64decode(sub_a.text + "===").decode("utf-8", "replace"),
+          "لینک ساب base64 سالم")
+    stats_json = sub_stats.json() if sub_stats.status_code == 200 else {}
+    check(stats_json.get("ok") is True and stats_json.get("name") == "کاربر رزیلر"
+          and stats_json.get("status_fa") in ("فعال", "غیرفعال", "منقضی", "اتمام حجم"),
+          "ساب با ?stats=1 اطلاعات JSON می‌دهد", str(stats_json.get("status_fa", "")))
+    check(sub_html.status_code == 200 and "اشتراک" in sub_html.text, "صفحه HTML ساب در مرورگر")
+
+    # ── آموزش راه‌اندازی ──
+    print(f"{YELLOW}==> تست آموزش راه‌اندازی{RESET}")
+    _, tut = await http_json(f"http://127.0.0.1:{PANEL_PORT}/api/admin/tutorial", cookies=cookies)
+    steps = tut.get("steps", [])
+    files = tut.get("files", {})
+    check(len(steps) >= 7 and all(s.get("code") for s in steps), "آموزش گام‌به‌گام داخل پنل", f"{len(steps)} گام")
+    check(len(files) >= 10 and any("Dockerfile.xray" in k for k in files),
+          "فایل‌های راه‌اندازی برای دانلود آماده‌اند", f"{len(files)} فایل")
+    check("MLP_NODE_TOKEN" in files.get("node/.env.example", "") or "MLP_NODE_TOKEN" in files.get("node/Dockerfile", ""),
+          "نمونه متغیرهای نود در بسته آموزش")
+    resp, _ = await http_json(
+        f"http://127.0.0.1:{PANEL_PORT}/api/admin/tutorial", "POST",
+        {"key": "step_panel", "title": "عنوان ویرایش‌شده", "text": "متن دلخواه"}, cookies,
+    )
+    _, tut2 = await http_json(f"http://127.0.0.1:{PANEL_PORT}/api/admin/tutorial", cookies=cookies)
+    edited = [s for s in tut2.get("steps", []) if s["key"] == "step_panel"][0]
+    check(resp.status_code == 200 and edited["title"] == "عنوان ویرایش‌شده", "ویرایش متن آموزش از داخل پنل")
+    await http_json(f"http://127.0.0.1:{PANEL_PORT}/api/admin/tutorial", "POST",
+                    {"key": "step_panel", "reset": True}, cookies)
+    _, tut3 = await http_json(f"http://127.0.0.1:{PANEL_PORT}/api/admin/tutorial", cookies=cookies)
+    reset_step = [s for s in tut3.get("steps", []) if s["key"] == "step_panel"][0]
+    check(reset_step["title"] != "عنوان ویرایش‌شده", "بازگردانی آموزش به پیش‌فرض")
+
+    # ── رابط کاربری پنل ──
+    print(f"{YELLOW}==> تست رابط کاربری اختصاصی{RESET}")
+    async with _httpx2.AsyncClient(timeout=15.0, cookies=dict(cookies)) as client:
+        panel_ui = await client.get(f"http://127.0.0.1:{PANEL_PORT}{secret}")
+        login_ui = await client.get(f"http://127.0.0.1:{PANEL_PORT}{secret}?fresh=1")
+    html_ui = panel_ui.text
+    tabs = ["داشبورد", "لوکیشن‌ها", "کاربران", "پلن‌ها", "سفارش‌ها", "رزیلرها", "کیف پول",
+            "اعلان‌ها", "برند و ظاهر", "آموزش راه‌اندازی", "رویدادها", "تنظیمات"]
+    check(panel_ui.status_code == 200 and all(t in html_ui for t in tabs), "همه‌ی تب‌های پنل در رابط کاربری", f"{len(tabs)} تب")
+    check("آموزش راه‌اندازی" in html_ui and "dlFile" in html_ui and "download(" in html_ui,
+          "دانلود فایل‌ها و آموزش داخل UI")
+    check("__ADMIN_PATH__" not in html_ui and "Momentum" not in html_ui,
+          "قالب UI پس از جای‌گذاری متغیرها سالم است")
+    check(html_ui.count("<html") == 1 and html_ui.count("/api/admin/") >= 10 and "async function go(" in html_ui,
+          "UI یک سند مستقل با API‌های واقعی", f"api_refs={html_ui.count('/api/admin/')}")
+
+    # ── موتور Xray (بدون باینری → config-only) ──
+    print(f"{YELLOW}==> تست موتور Xray (حالت پیکربندی){RESET}")
+    from node.app.xray_engine import engine as xray_engine  # noqa: E402
+
+    selfcheck = xray_engine.self_check()
+    check(selfcheck.get("ok") and selfcheck.get("clients") == 0 and len(selfcheck.get("inbounds", [])) >= 3,
+          "پیکربندی Xray ساخته می‌شود", f"{selfcheck.get('bytes')} بایت · {','.join(selfcheck.get('inbounds', []))}")
+    cfg_path = Path(selfcheck["path"]) if selfcheck.get("path") else None
+    cfg_text = cfg_path.read_text(encoding="utf-8") if cfg_path and cfg_path.exists() else json_dumps(selfcheck.get("config", {}))
+    check("10085" in cfg_text and '"stats"' in cfg_text and "bittorrent" in cfg_text.lower(),
+          "Xray: API آماری ۱۰۰۸۵ + بلاک تورنت")
+    check("splithttp" in cfg_text or "xhttp" in cfg_text, "Xray: ترابرد XHTTP در پیکربندی")
+    if not selfcheck.get("binary_found"):
+        check(xray_engine.status().get("running") is False, "نبود باینری Xray → اجرا نمی‌شود (fallback)")
+
+    # پروکسی نود در حالت پایتون بدون باینری سرِ جایش است
+    from node.app.main import xray_active  # noqa: E402
+
+    check(xray_active() is False, "نود بدون باینری روی موتور پایتون می‌ماند")
+
+    # ── فایل‌های استقرار Xray ──
+    check((ROOT / "node" / "nginx.conf.template").exists() and (ROOT / "node" / "start-xray.sh").exists(),
+          "فایل‌های nginx و اسکریپت راه‌اندازی Xray موجودند")
+    nginx_conf = (ROOT / "node" / "nginx.conf.template").read_text(encoding="utf-8")
+    check("proxy_pass http://127.0.0.1:${XRAY_WS_PORT}" in nginx_conf and "proxy_buffering off" in nginx_conf,
+          "nginx: مسیر WS به Xray با بافر خاموش")
+    docker_xray = (ROOT / "node" / "Dockerfile.xray").read_text(encoding="utf-8")
+    check("Xray-linux-64.zip" in docker_xray and "MLP_ENGINE=xray" in docker_xray,
+          "Dockerfile.xray باینری را از انتشار رسمی می‌گیرد")
+
+    # ── بررسی هم‌خوانی بسته‌ی فایل‌های آموزش ──
+    import subprocess as _sp
+
+    gen = _sp.run([PY, str(ROOT / "tools" / "gen_setup_files.py"), "--check"], cwd=ROOT, capture_output=True, text=True)
+    check(gen.returncode == 0, "بسته setup_files.json با مخزن هم‌خوان است", gen.stdout.strip() or gen.stderr.strip()[:80])
 
     # ── پاکسازی ──
     for proc in (node, panel):

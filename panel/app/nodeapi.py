@@ -89,6 +89,7 @@ async def node_sync(request: Request, authorization: str = Header(default=""), x
             "xhttp_path": location["xhttp_path"] or "/xhttp",
             "transports": location["transports"],
             "tcp_port": int(location["tcp_port"] or 0),
+            "engine": location.get("engine") or "python",
         },
         "panel": {
             "title": settings.get("panel_title") or "MLP",

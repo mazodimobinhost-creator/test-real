@@ -7,6 +7,9 @@ from pathlib import Path
 
 APP_VERSION = "1.0.0"
 
+# موتور دیتاپلین: python (پیش‌فرض، اعمال کامل محدودیت‌ها) یا xray (سرعت بالاتر)
+ENGINE = (os.environ.get("MLP_ENGINE") or "python").strip().lower()
+
 PANEL_URL = (os.environ.get("MLP_PANEL_URL") or "").strip().rstrip("/")
 NODE_TOKEN = (os.environ.get("MLP_NODE_TOKEN") or "").strip()
 NODE_NAME = os.environ.get("MLP_NODE_NAME", "node")
@@ -32,3 +35,14 @@ SESSION_IDLE_TIMEOUT = float(os.environ.get("MLP_XHTTP_IDLE", "45"))
 CONNECT_TIMEOUT = float(os.environ.get("MLP_CONNECT_TIMEOUT", "12"))
 # اگر باندل پنل قدیمی‌تر از این مقدار باشد، کاربران فعلی معتبر می‌مانند (پنل قطع = قطع نشدن کاربر)
 ALLOW_STALE_BUNDLE_SECONDS = float(os.environ.get("MLP_ALLOW_STALE_BUNDLE", "3600"))
+
+# سایت پوششی (Decoy): auto | shop | corp | blog | none
+DECOY = (os.environ.get("MLP_DECOY") or "auto").strip().lower()
+DECOY_NAME = os.environ.get("MLP_DECOY_NAME", "").strip()
+
+# در موتور Xray، این پورت داخلی است که nginx ترافیک غیرپروکسی را به آن می‌دهد
+INTERNAL_PORT = int(os.environ.get("MLP_INTERNAL_PORT", "8090"))
+
+# بهینه‌سازی: اندازه‌ی بافر خواندن و آستانه‌ی درین تطبیقی
+READ_BUFFER = int(os.environ.get("MLP_READ_BUFFER", str(128 * 1024)))
+DRAIN_HIGH_WATER = int(os.environ.get("MLP_DRAIN_HIGH_WATER", str(2 * 1024 * 1024)))

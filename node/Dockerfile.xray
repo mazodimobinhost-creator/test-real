@@ -1,0 +1,36 @@
+# MLP Node با موتور Xray-core (سرعت بالاتر)
+FROM python:3.12-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    MLP_ENGINE=xray \
+    MLP_NODE_DATA_DIR=/tmp/mlp-node \
+    PORT=8080
+
+ARG XRAY_VERSION=latest
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      nginx gettext-base curl ca-certificates unzip tzdata \
+ && rm -rf /var/lib/apt/lists/* /etc/nginx/sites-enabled/default \
+ && ( if [ "$XRAY_VERSION" = "latest" ]; then \
+        curl -fsSL -o /tmp/xray.zip "https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip"; \
+      else \
+        curl -fsSL -o /tmp/xray.zip "https://github.com/XTLS/Xray-core/releases/download/${XRAY_VERSION}/Xray-linux-64.zip"; \
+      fi ) \
+ && unzip -o /tmp/xray.zip -d /usr/local/bin >/dev/null \
+ && chmod +x /usr/local/bin/xray \
+ && rm -f /tmp/xray.zip \
+ && ln -sf /usr/share/zoneinfo/Asia/Tehran /etc/localtime
+
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt \
+ && pip install --no-cache-dir xray || true
+
+COPY app ./app
+COPY nginx.conf.template /etc/nginx/nginx.conf.template
+COPY start-xray.sh /start.sh
+RUN chmod +x /start.sh
+
+EXPOSE 8080
+CMD ["/start.sh"]

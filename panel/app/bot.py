@@ -16,7 +16,9 @@ API_BASE = "https://api.telegram.org"
 _client: httpx.AsyncClient | None = None
 _task: asyncio.Task | None = None
 _offset = 0
-_pending_plan: dict[str, int] = {}   # chat_id -> plan_id
+_pending_plan: dict[str, int] = {}          # chat_id -> plan_id
+_reseller_sessions: dict[str, int] = {}    # chat_id -> reseller_id (ورود رزیلر)
+_states: dict[str, dict] = {}              # chat_id -> وضعیت ویزارد
 _started_for_token = ""
 
 
@@ -118,6 +120,34 @@ async def _handle_message(message: dict) -> None:
     who = message.get("from", {}).get("username") or message.get("from", {}).get("first_name") or str(chat_id)
     tg_id = str(message.get("from", {}).get("id") or chat_id)
 
+    # ۱) ویزارد در جریان (رزیلر / شارژ)
+    if str(chat_id) in _states and not text.startswith("/"):
+        handled = await _continue_state(chat_id, tg_id, text, message)
+        if handled:
+            return
+    if text.startswith("/cancel"):
+        _states.pop(str(chat_id), None)
+        await send(chat_id, "لغو شد.")
+        return
+
+    # ۲) دستورات رزیلر
+    if text.startswith("/reseller"):
+        await _reseller_menu(chat_id, tg_id)
+        return
+    if text.startswith("/myusers"):
+        await _reseller_users_list(chat_id, tg_id)
+        return
+    if text.startswith("/logout_reseller"):
+        _reseller_sessions.pop(str(chat_id), None)
+        await send(chat_id, "از حساب رزیلری خارج شدی.")
+        return
+
+    # ۳) پیام مستقیم به ادمین/رزیلر برای شارژ
+    if str(chat_id) in _states:
+        handled = await _continue_state(chat_id, tg_id, text, message)
+        if handled:
+            return
+
     if text.startswith("/start"):
         user = store.get_user_by_telegram(tg_id)
         if user:
@@ -164,6 +194,28 @@ async def _handle_message(message: dict) -> None:
             extra = f" · {st.get('connections', 0)} اتصال" if st else ""
             lines.append(f"{online} {loc['flag']} {loc['name']} ({loc['host'] or 'بدون دامنه'}){extra}")
         await send(chat_id, "\n".join(lines) or "لوکیشنی ثبت نشده", markdown=True)
+        return
+
+    if text.startswith("/resellers") and _is_admin(tg_id):
+        rows = store.list_resellers()
+        if not rows:
+            await send(chat_id, "رزیلری ثبت نشده است (پنل → رزیلرها)")
+            return
+        lines = ["🤝 <b>رزیلرها</b>"]
+        for r in rows:
+            summary = store.reseller_user_summary(int(r["id"]))
+            lines.append(f"• {html.escape(r['name'] or r['username'])} — موجودی {r['balance']:,} · {summary['users']} کاربر")
+        await send(chat_id, "\n".join(lines), markdown=True)
+        return
+
+    if text.startswith("/announce") and _is_admin(tg_id):
+        body = text[len("/announce"):].strip()
+        if not body:
+            await send(chat_id, "متن اعلان را بعد از دستور بنویس.")
+            return
+        store.set_announce_bar(body)
+        result = await broadcast_message(body)
+        await send(chat_id, f"📣 اعلان ثبت و برای {result.get('sent', 0)} کاربر ارسال شد.")
         return
 
     if text.startswith("/adduser") and _is_admin(tg_id):
@@ -228,6 +280,23 @@ async def _handle_callback(cb: dict) -> None:
     tg_id = str(cb.get("from", {}).get("id") or "")
     await api("answerCallbackQuery", {"callback_query_id": cb.get("id")})
 
+    if data.startswith("rs:"):
+        await _reseller_callback(chat_id, tg_id, data)
+        return
+    if data.startswith("wtx:") and _is_admin(tg_id):
+        _, action, tx_raw = data.split(":", 2)
+        tx_id = int(tx_raw)
+        tx = store.set_tx_status(tx_id, "approved" if action == "approve" else "rejected", f"ادمین {tg_id}")
+        if tx:
+            reseller = store.get_reseller(int(tx["reseller_id"])) or {}
+            await send(chat_id, f"تراکنش #{tx_id} {'تأیید' if action == 'approve' else 'رد'} شد.")
+            tg = str(reseller.get("note") or "")
+            if tg.isdigit():
+                if action == "approve":
+                    await send(tg, f"✅ شارژ کیف پول تأیید شد.\nموجودی: {store.reseller_balance(int(reseller['id'])):,} تومان")
+                else:
+                    await send(tg, "❌ درخواست شارژ تأیید نشد.")
+        return
     if data == "plans":
         await _send_plans(chat_id)
         return
@@ -375,3 +444,227 @@ async def stop_bot() -> None:
     if _client is not None:
         await _client.aclose()
         _client = None
+
+
+# ═════════════════════ رزیلر و کیف پول ═════════════════════
+def _reseller_of(chat_id) -> dict | None:
+    rid = _reseller_sessions.get(str(chat_id))
+    if not rid:
+        return None
+    reseller = store.get_reseller(int(rid))
+    if not reseller or not int(reseller.get("enabled") or 0):
+        _reseller_sessions.pop(str(chat_id), None)
+        return None
+    return reseller
+
+
+async def _reseller_menu(chat_id, tg_id: str) -> None:
+    reseller = _reseller_of(chat_id)
+    if reseller:
+        summary = store.reseller_user_summary(int(reseller["id"]))
+        await send(
+            chat_id,
+            f"🤝 <b>{html.escape(reseller['name'] or reseller['username'])}</b>\n"
+            f"موجودی کیف پول: <b>{store.reseller_balance(int(reseller['id'])):,} تومان</b>\n"
+            f"کاربران: {summary['users']} (فعال: {summary['active']}) · مصرف: {round(summary['used'] / 1024**2, 1)} MB\n"
+            f"تعرفه: {reseller['price_gb']:,} تومان/GB · {reseller['price_day']:,} تومان/روز",
+            _kb([
+                [("➕ ساخت کاربر", "rs:new"), ("👥 کاربران من", "rs:users")],
+                [("💰 شارژ کیف پول", "rs:wallet"), ("🚪 خروج", "rs:logout")],
+            ]),
+            markdown=True,
+        )
+        return
+    _states[str(chat_id)] = {"flow": "reseller_login_user"}
+    await send(chat_id, "🔐 نام کاربری رزیلری‌ات را بفرست (برای لغو: /cancel)")
+
+
+async def _reseller_callback(chat_id, tg_id: str, data: str) -> None:
+    reseller = _reseller_of(chat_id)
+    action = data.split(":", 1)[1] if ":" in data else ""
+    if action == "logout":
+        _reseller_sessions.pop(str(chat_id), None)
+        await send(chat_id, "خارج شدی.")
+        return
+    if not reseller:
+        await _reseller_menu(chat_id, tg_id)
+        return
+    if action == "new":
+        _states[str(chat_id)] = {"flow": "reseller_new_user", "step": "name", "data": {}}
+        await send(chat_id, "👤 نام کاربر جدید را بفرست (برای لغو: /cancel)")
+        return
+    if action == "users":
+        await _reseller_users_list(chat_id, tg_id)
+        return
+    if action == "wallet":
+        _states[str(chat_id)] = {"flow": "topup", "step": "amount"}
+        await send(chat_id, "💳 مبلغ شارژ (تومان) را بفرست. بعد از آن، عکس رسید را ارسال کن.")
+        return
+    if action.startswith("buyplan:"):
+        plan_id = int(action.split(":", 1)[1])
+        await _reseller_buy_plan(chat_id, reseller, plan_id)
+        return
+
+
+async def _reseller_buy_plan(chat_id, reseller: dict, plan_id: int) -> None:
+    plan = store.get_plan(plan_id)
+    if not plan:
+        await send(chat_id, "پلن پیدا نشد.")
+        return
+    price = int(plan.get("reseller_price") or 0)
+    if price <= 0:
+        price = int(plan.get("traffic_gb") or 0) * int(reseller.get("price_gb") or 0) + \
+            int(plan.get("days") or 0) * int(reseller.get("price_day") or 0)
+    if not store.charge_reseller(int(reseller["id"]), price, f"خرید پلن {plan['name']}"):
+        await send(chat_id, f"❌ موجودی کافی نیست. لازم: {price:,} تومان — موجودی: {store.reseller_balance(int(reseller['id'])):,}")
+        return
+    user_id = store.save_user({
+        "name": f"{reseller['name'] or reseller['username']}-{store.now_ts() % 10000}",
+        "limit_bytes": int(float(plan.get("traffic_gb") or 0) * 1024 ** 3),
+        "expire_at": store.days_from_now_ts(int(plan.get("days") or 0)),
+        "max_ips": int(plan.get("max_ips") or 0),
+        "speed_kbps": int(plan.get("speed_kbps") or 0),
+        "enabled": True,
+        "reseller_id": int(reseller["id"]),
+        "note": f"رزیلر {reseller['username']} · پلن {plan['name']}",
+    })
+    store.enable_user_on_all_locations(user_id)
+    store.log_event("reseller", f"رزیلر {reseller['username']} یک کاربر ساخت ({price:,} تومان)", "ok")
+    user = store.get_user(user_id) or {}
+    await send(chat_id, f"✅ کاربر ساخته شد.\n{_account_text(user)}\n\nموجودی جدید: {store.reseller_balance(int(reseller['id'])):,} تومان", markdown=True)
+
+
+async def _reseller_users_list(chat_id, tg_id: str) -> None:
+    reseller = _reseller_of(chat_id)
+    if not reseller:
+        await _reseller_menu(chat_id, tg_id)
+        return
+    users = store.list_users(reseller_id=int(reseller["id"]))[:15]
+    if not users:
+        await send(chat_id, "هنوز کاربری نساخته‌ای.")
+        return
+    lines = ["👥 <b>کاربران تو</b>"]
+    for u in users:
+        lines.append(f"• {html.escape(u['name'])} — {u['status']} · {round(int(u['used_bytes']) / 1024**2, 1)} MB")
+    await send(chat_id, "\n".join(lines), markdown=True)
+
+
+async def _continue_state(chat_id, tg_id: str, text: str, message: dict) -> bool:
+    """ورودی‌های ویزارد رزیلر/شارژ را پردازش می‌کند. True یعنی مصرف شد."""
+    state = _states.get(str(chat_id))
+    if not state:
+        return False
+    flow = state.get("flow")
+
+    if flow == "reseller_login_user":
+        state["username"] = text.strip()
+        state["flow"] = "reseller_login_pass"
+        await send(chat_id, "🔑 رمز را بفرست.")
+        return True
+
+    if flow == "reseller_login_pass":
+        from .security import verify_password
+
+        reseller = store.get_reseller_by_username(state.get("username") or "")
+        if not reseller or not verify_password(text.strip(), reseller.get("password_hash") or ""):
+            _states.pop(str(chat_id), None)
+            await send(chat_id, "❌ نام کاربری یا رمز نادرست است.")
+            return True
+        if not int(reseller.get("enabled") or 0):
+            _states.pop(str(chat_id), None)
+            await send(chat_id, "حساب رزیلری غیرفعال است.")
+            return True
+        store.execute("UPDATE resellers SET last_login=? WHERE id=?", (store.now_ts(), reseller["id"]))
+        _reseller_sessions[str(chat_id)] = int(reseller["id"])
+        _states.pop(str(chat_id), None)
+        await _reseller_menu(chat_id, tg_id)
+        return True
+
+    if flow == "reseller_new_user":
+        step = state.get("step")
+        data = state.setdefault("data", {})
+        if step == "name":
+            data["name"] = text.strip()[:60] or "user"
+            state["step"] = "gb"
+            await send(chat_id, "📦 حجم (GB)؟ (0 = نامحدود)")
+            return True
+        if step == "gb":
+            try:
+                data["gb"] = float(text.replace(",", "").strip())
+            except ValueError:
+                await send(chat_id, "عدد نامعتبر. دوباره بفرست.")
+                return True
+            state["step"] = "days"
+            await send(chat_id, "📆 مدت (روز)؟")
+            return True
+        if step == "days":
+            try:
+                data["days"] = int(float(text.replace(",", "").strip()))
+            except ValueError:
+                await send(chat_id, "عدد نامعتبر. دوباره بفرست.")
+                return True
+            state["step"] = "confirm"
+            reseller = _reseller_of(chat_id) or {}
+            cost = int(data.get("gb", 0) * int(reseller.get("price_gb") or 0)) + data.get("days", 0) * int(reseller.get("price_day") or 0)
+            data["cost"] = cost
+            await send(
+                chat_id,
+                f"🧾 خلاصه:\nنام: {html.escape(data.get('name', ''))}\nحجم: {data.get('gb')} GB\n"
+                f"مدت: {data.get('days')} روز\nهزینه: <b>{cost:,} تومان</b>\n\nتأیید؟ (بله / خیر)",
+                markdown=True,
+            )
+            return True
+        if step == "confirm":
+            answer = text.strip().lower()
+            reseller = _reseller_of(chat_id) or {}
+            if answer in ("بله", "yes", "y", "ok", "تایید", "تأیید"):
+                price = int(data.get("cost") or 0)
+                if not store.charge_reseller(int(reseller["id"]), price, f"ساخت کاربر {data.get('name')}"):
+                    _states.pop(str(chat_id), None)
+                    await send(chat_id, f"❌ موجودی کافی نیست (لازم: {price:,}).")
+                    return True
+                user_id = store.save_user({
+                    "name": data.get("name") or "user",
+                    "limit_bytes": int(data.get("gb", 0) * 1024 ** 3),
+                    "expire_at": store.days_from_now_ts(int(data.get("days") or 0)),
+                    "enabled": True,
+                    "reseller_id": int(reseller["id"]),
+                    "note": f"رزیلر {reseller.get('username')}",
+                })
+                store.enable_user_on_all_locations(user_id)
+                user = store.get_user(user_id) or {}
+                _states.pop(str(chat_id), None)
+                await send(chat_id, f"✅ ساخته شد (هزینه {price:,} تومان)\n{_account_text(user)}\n\nموجودی: {store.reseller_balance(int(reseller['id'])):,}", markdown=True)
+            else:
+                _states.pop(str(chat_id), None)
+                await send(chat_id, "لغو شد.")
+            return True
+
+    if flow == "topup":
+        step = state.get("step")
+        if step == "amount":
+            try:
+                amount = int(float(text.replace(",", "").strip()))
+            except ValueError:
+                await send(chat_id, "عدد نامعتبر. مبلغ را به تومان بفرست.")
+                return True
+            state["data"] = {"amount": amount}
+            state["step"] = "receipt"
+            card = store.get_setting("brand_card_number") or "—"
+            holder = store.get_setting("brand_card_holder") or ""
+            await send(chat_id, f"💳 مبلغ {amount:,} تومان به کارت زیر واریز کن و عکس رسید را بفرست:\n{card}\n{holder}")
+            return True
+        if step == "receipt":
+            photo = message.get("photo") or []
+            file_id = photo[-1].get("file_id", "") if photo else (message.get("document") or {}).get("file_id", "")
+            reseller = _reseller_of(chat_id) or {}
+            tx_id = store.add_balance(int(reseller["id"]), int(state["data"]["amount"]), "topup",
+                                      note=store.get_setting("brand_card_number"), receipt=file_id, status="pending")
+            _states.pop(str(chat_id), None)
+            await send(chat_id, f"🧾 درخواست شارژ #{tx_id} ثبت شد. بعد از تأیید ادمین، موجودی‌ات افزایش می‌یابد.")
+            kb = _kb([[("✅ تأیید", f"wtx:approve:{tx_id}"), ("❌ رد", f"wtx:reject:{tx_id}")]])
+            for admin in _admin_ids():
+                await send(admin, f"💰 درخواست شارژ #{tx_id}\nرزیلر: {html.escape(reseller.get('name') or '')}\nمبلغ: {int(state['data']['amount']):,} تومان", kb, markdown=True)
+            return True
+
+    return False

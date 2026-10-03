@@ -49,6 +49,7 @@ CREATE TABLE IF NOT EXISTS users (
     enabled INTEGER NOT NULL DEFAULT 1,
     note TEXT NOT NULL DEFAULT '',
     telegram_id TEXT NOT NULL DEFAULT '',
+    reseller_id INTEGER NOT NULL DEFAULT 0,
     created_at INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS user_locations (
@@ -99,7 +100,45 @@ CREATE TABLE IF NOT EXISTS sessions (
     expires_at INTEGER NOT NULL DEFAULT 0,
     ip TEXT NOT NULL DEFAULT ''
 );
+CREATE TABLE IF NOT EXISTS resellers (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL DEFAULT '',
+    username TEXT NOT NULL UNIQUE,
+    password_hash TEXT NOT NULL DEFAULT '',
+    balance INTEGER NOT NULL DEFAULT 0,
+    price_gb INTEGER NOT NULL DEFAULT 0,
+    price_day INTEGER NOT NULL DEFAULT 0,
+    min_gb REAL NOT NULL DEFAULT 1,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    note TEXT NOT NULL DEFAULT '',
+    created_at INTEGER NOT NULL DEFAULT 0,
+    last_login INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS wallet_tx (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    reseller_id INTEGER NOT NULL DEFAULT 0,
+    amount INTEGER NOT NULL DEFAULT 0,
+    kind TEXT NOT NULL DEFAULT 'topup',
+    status TEXT NOT NULL DEFAULT 'pending',
+    receipt TEXT NOT NULL DEFAULT '',
+    note TEXT NOT NULL DEFAULT '',
+    created_at INTEGER NOT NULL DEFAULT 0,
+    decided_at INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS announcements (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    title TEXT NOT NULL DEFAULT '',
+    body TEXT NOT NULL DEFAULT '',
+    level TEXT NOT NULL DEFAULT 'info',
+    enabled INTEGER NOT NULL DEFAULT 1,
+    created_at INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS content_blocks (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL DEFAULT ''
+);
 CREATE INDEX IF NOT EXISTS idx_events_ts ON events (ts DESC);
+CREATE INDEX IF NOT EXISTS idx_wallet_status ON wallet_tx (status);
 CREATE INDEX IF NOT EXISTS idx_orders_status ON orders (status);
 """
 
@@ -121,6 +160,24 @@ DEFAULT_SETTINGS: dict[str, str] = {
     "node_default_xhttp_path": "/xhttp",
     "traffic_multiplier": "1",
     "first_run_done": "0",
+    # ── مسیر مخفی پنل و برند ──
+    "secret_path": "",
+    "site_mode": "marketing",          # marketing | app | countdown
+    "brand_name": "آریا کلود",
+    "brand_slogan": "اینترنت بدون مرز، برای همه",
+    "brand_color": "#5b6cff",
+    "brand_color2": "#a855f7",
+    "brand_logo": "◆",
+    "brand_hero": "با یک اشتراک، از هر کجا وصل شو",
+    "brand_features": "چند لوکیشن\nاتصال سریع و پایدار\nپشتیبانی واقعی\nفعال‌سازی خودکار",
+    "brand_card_number": "6037-XXXX-XXXX-XXXX",
+    "brand_card_holder": "به نام مدیر سرویس",
+    "brand_contact": "https://t.me/",
+    "marketing_show_plans": "1",
+    "announce_bar": "",
+    "custom_domain": "",
+    "xray_enabled": "0",
+    "tutorial_enabled": "1",
 }
 
 
@@ -137,6 +194,21 @@ def connect() -> sqlite3.Connection:
         return _conn
 
 
+def _ensure_columns() -> None:
+    """مهاجرت‌های سبک: ستون‌های جدید روی پایگاه‌داده‌ی قدیمی."""
+    wanted = {
+        "users": {"reseller_id": "INTEGER NOT NULL DEFAULT 0"},
+        "locations": {"engine": "TEXT NOT NULL DEFAULT 'python'"},
+        "plans": {"reseller_price": "INTEGER NOT NULL DEFAULT 0"},
+    }
+    for table, cols in wanted.items():
+        existing = {row["name"] for row in query(f"PRAGMA table_info({table})")}
+        for name, ddl in cols.items():
+            if name not in existing:
+                execute(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
+                log_event("panel", f"ستون {table}.{name} اضافه شد", "info")
+
+
 def init_db() -> None:
     with _lock:
         conn = connect()
@@ -144,6 +216,7 @@ def init_db() -> None:
         for key, value in DEFAULT_SETTINGS.items():
             conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", (key, value))
         conn.commit()
+        _ensure_columns()
         cur = conn.execute("SELECT value FROM settings WHERE key='admin_password_hash'")
         row = cur.fetchone()
         if not row or not row["value"]:
@@ -278,6 +351,7 @@ def save_location(data: dict) -> int:
         "xhttp_path": str(data.get("xhttp_path") or "/xhttp").strip()[:80],
         "tcp_port": int(data.get("tcp_port") or 0),
         "cf_host": str(data.get("cf_host") or "").strip()[:200],
+        "engine": str(data.get("engine") or "python").strip().lower()[:12],
         "enabled": 1 if data.get("enabled", True) else 0,
         "sort": int(data.get("sort") or 0),
         "note": str(data.get("note") or "")[:400],
@@ -321,18 +395,21 @@ def location_is_online(loc: dict) -> bool:
 
 
 # ───────────────────────────── کاربران ─────────────────────────────────────
-def list_users() -> list[dict]:
-    users = [dict(r) for r in query("SELECT * FROM users ORDER BY id DESC")]
-    marks = {r["user_id"]: r for r in query("SELECT * FROM usage_marks")}
+def list_users(reseller_id: int | None = None) -> list[dict]:
+    if reseller_id:
+        users = [dict(r) for r in query("SELECT * FROM users WHERE reseller_id=? ORDER BY id DESC", (reseller_id,))]
+    else:
+        users = [dict(r) for r in query("SELECT * FROM users ORDER BY id DESC")]
     links: dict[int, list[int]] = {}
     for row in query("SELECT * FROM user_locations"):
         links.setdefault(row["user_id"], []).append(row["location_id"])
+    names = {r["id"]: r["name"] for r in query("SELECT id, name FROM resellers")}
     for u in users:
         u["locations"] = links.get(u["id"], [])
         u["expire_iso"] = ts_to_iso(u["expire_at"])
         u["days_left"] = days_left(u["expire_at"])
         u["status"] = user_status(u)
-        u.setdefault("_", None)
+        u["reseller_name"] = names.get(int(u.get("reseller_id") or 0), "")
     return users
 
 
@@ -376,6 +453,7 @@ def save_user(data: dict) -> int:
         "enabled": 1 if data.get("enabled", True) else 0,
         "note": str(data.get("note") or "")[:400],
         "telegram_id": str(data.get("telegram_id") or "").strip()[:32],
+        "reseller_id": int(data.get("reseller_id") or 0),
     }
     if user_id:
         sets = ", ".join(f"{k}=?" for k in fields)
@@ -516,6 +594,7 @@ def save_plan(data: dict) -> int:
         "speed_kbps": int(data.get("speed_kbps") or 0),
         "enabled": 1 if data.get("enabled", True) else 0,
         "sort": int(data.get("sort") or 0),
+        "reseller_price": int(data.get("reseller_price") or 0),
     }
     if plan_id:
         sets = ", ".join(f"{k}=?" for k in fields)
@@ -594,14 +673,230 @@ def stats_overview() -> dict:
     locs = list_locations()
     online = [l for l in locs if location_is_online(l)]
     pending = one("SELECT COUNT(*) AS c FROM orders WHERE status='pending'")["c"]
+    pending_top = one("SELECT COUNT(*) AS c FROM wallet_tx WHERE status='pending'")["c"]
     return {
         "users": len(users),
         "active_users": len(active),
         "locations": len(locs),
         "online_locations": len(online),
         "pending_orders": int(pending or 0),
+        "pending_topups": int(pending_top or 0),
         "total_traffic": total_traffic(),
         "used_bytes": sum(int(u.get("used_bytes") or 0) for u in users),
         "limited_users": len([u for u in users if user_status(u) == "limited"]),
         "expired_users": len([u for u in users if user_status(u) == "expired"]),
+    }
+
+
+# ───────────────────────────── محتوا و برند ─────────────────────────────
+def get_block(key: str, default: str = "") -> str:
+    row = one("SELECT value FROM content_blocks WHERE key=?", (key,))
+    return row["value"] if row else default
+
+
+def set_block(key: str, value: str) -> None:
+    execute(
+        "INSERT INTO content_blocks (key, value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        (key, value or ""),
+    )
+
+
+def all_blocks() -> dict[str, str]:
+    return {row["key"]: row["value"] for row in query("SELECT key, value FROM content_blocks")}
+
+
+def brand() -> dict:
+    settings = all_settings()
+    return {
+        "name": settings.get("brand_name") or "سرویس من",
+        "slogan": settings.get("brand_slogan") or "",
+        "color": settings.get("brand_color") or "#5b6cff",
+        "color2": settings.get("brand_color2") or "#a855f7",
+        "logo": settings.get("brand_logo") or "◆",
+        "hero": settings.get("brand_hero") or "",
+        "features": [x.strip() for x in (settings.get("brand_features") or "").splitlines() if x.strip()],
+        "card_number": settings.get("brand_card_number") or "",
+        "card_holder": settings.get("brand_card_holder") or "",
+        "contact": settings.get("brand_contact") or "",
+        "plan_title": settings.get("panel_title") or "پنل",
+        "site_mode": settings.get("site_mode") or "marketing",
+        "announce_bar": settings.get("announce_bar") or "",
+        "show_plans": settings.get("marketing_show_plans", "1") == "1",
+        "custom_domain": (settings.get("custom_domain") or "").strip().rstrip("/"),
+    }
+
+
+def secret_path() -> str:
+    raw = (get_setting("secret_path") or "").strip()
+    if not raw:
+        import secrets as _secrets
+
+        raw = "/" + _secrets.token_hex(4)
+        set_setting("secret_path", raw)
+    raw = "/" + raw.strip("/")
+    return raw
+
+
+# ───────────────────────────── اعلان‌ها ─────────────────────────────
+def list_announcements(only_enabled: bool = False) -> list[dict]:
+    sql = "SELECT * FROM announcements"
+    if only_enabled:
+        sql += " WHERE enabled=1"
+    sql += " ORDER BY id DESC LIMIT 50"
+    return [dict(r) for r in query(sql)]
+
+
+def get_announcement(aid: int) -> dict | None:
+    row = one("SELECT * FROM announcements WHERE id=?", (aid,))
+    return dict(row) if row else None
+
+
+def save_announcement(data: dict) -> int:
+    aid = int(data.get("id") or 0)
+    fields = {
+        "title": str(data.get("title") or "")[:120],
+        "body": str(data.get("body") or "")[:2000],
+        "level": str(data.get("level") or "info")[:16],
+        "enabled": 1 if data.get("enabled", True) else 0,
+    }
+    if aid:
+        sets = ", ".join(f"{k}=?" for k in fields)
+        execute(f"UPDATE announcements SET {sets} WHERE id=?", (*fields.values(), aid))
+        return aid
+    fields["created_at"] = now_ts()
+    cols = ", ".join(fields)
+    marks = ", ".join("?" for _ in fields)
+    return int(execute(f"INSERT INTO announcements ({cols}) VALUES ({marks})", tuple(fields.values())).lastrowid)
+
+
+def delete_announcement(aid: int) -> None:
+    execute("DELETE FROM announcements WHERE id=?", (aid,))
+
+
+def set_announce_bar(text: str) -> None:
+    set_setting("announce_bar", text[:300])
+
+
+# ───────────────────────────── رزیلرها ─────────────────────────────
+def list_resellers() -> list[dict]:
+    return [dict(r) for r in query("SELECT * FROM resellers ORDER BY id DESC")]
+
+
+def get_reseller(rid: int) -> dict | None:
+    row = one("SELECT * FROM resellers WHERE id=?", (rid,))
+    return dict(row) if row else None
+
+
+def get_reseller_by_username(username: str) -> dict | None:
+    row = one("SELECT * FROM resellers WHERE username=?", (username,))
+    return dict(row) if row else None
+
+
+def save_reseller(data: dict) -> int:
+    from .security import hash_password
+
+    rid = int(data.get("id") or 0)
+    fields = {
+        "name": str(data.get("name") or "").strip()[:80],
+        "username": str(data.get("username") or "").strip()[:40],
+        "price_gb": int(data.get("price_gb") or 0),
+        "price_day": int(data.get("price_day") or 0),
+        "min_gb": float(data.get("min_gb") or 1),
+        "enabled": 1 if data.get("enabled", True) else 0,
+        "note": str(data.get("note") or "")[:300],
+    }
+    if rid:
+        sets = ", ".join(f"{k}=?" for k in fields)
+        execute(f"UPDATE resellers SET {sets} WHERE id=?", (*fields.values(), rid))
+        if data.get("password"):
+            execute("UPDATE resellers SET password_hash=? WHERE id=?", (hash_password(str(data["password"])), rid))
+        return rid
+    fields["username"] = fields["username"] or f"reseller{now_ts()}"
+    fields["password_hash"] = hash_password(str(data.get("password") or "reseller123"))
+    fields["created_at"] = now_ts()
+    cols = ", ".join(fields)
+    marks = ", ".join("?" for _ in fields)
+    return int(execute(f"INSERT INTO resellers ({cols}) VALUES ({marks})", tuple(fields.values())).lastrowid)
+
+
+def delete_reseller(rid: int) -> None:
+    execute("DELETE FROM resellers WHERE id=?", (rid,))
+    execute("DELETE FROM wallet_tx WHERE reseller_id=?", (rid,))
+
+
+def reseller_balance(rid: int) -> int:
+    row = one("SELECT balance FROM resellers WHERE id=?", (rid,))
+    return int(row["balance"]) if row else 0
+
+
+def add_balance(rid: int, amount: int, kind: str = "topup", note: str = "", receipt: str = "",
+                status: str = "approved") -> int:
+    amount = int(amount)
+    tx_id = int(execute(
+        """INSERT INTO wallet_tx (reseller_id, amount, kind, status, receipt, note, created_at, decided_at)
+           VALUES (?,?,?,?,?,?,?,?)""",
+        (rid, amount, kind, status, receipt[:300], note[:300], now_ts(), now_ts() if status != "pending" else 0),
+    ).lastrowid)
+    if status == "approved":
+        execute("UPDATE resellers SET balance = balance + ? WHERE id=?", (amount, rid))
+    return tx_id
+
+
+def list_wallet_tx(status: str | None = None, reseller_id: int | None = None, limit: int = 100) -> list[dict]:
+    sql = "SELECT * FROM wallet_tx"
+    where, params = [], []
+    if status:
+        where.append("status=?")
+        params.append(status)
+    if reseller_id:
+        where.append("reseller_id=?")
+        params.append(reseller_id)
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY id DESC LIMIT ?"
+    params.append(limit)
+    rows = [dict(r) for r in query(sql, params)]
+    names = {r["id"]: r["name"] for r in query("SELECT id, name FROM resellers")}
+    for row in rows:
+        row["reseller_name"] = names.get(row["reseller_id"], "—")
+    return rows
+
+
+def set_tx_status(tx_id: int, status: str, note: str = "") -> dict | None:
+    row = one("SELECT * FROM wallet_tx WHERE id=?", (tx_id,))
+    if not row:
+        return None
+    tx = dict(row)
+    if tx["status"] == status:
+        return tx
+    execute("UPDATE wallet_tx SET status=?, decided_at=?, note=? WHERE id=?", (status, now_ts(), note[:300], tx_id))
+    if status == "approved" and tx["status"] != "approved":
+        execute("UPDATE resellers SET balance = balance + ? WHERE id=?", (int(tx["amount"]), int(tx["reseller_id"])))
+    if status == "rejected" and tx["status"] == "approved":
+        execute("UPDATE resellers SET balance = balance - ? WHERE id=?", (int(tx["amount"]), int(tx["reseller_id"])))
+    return get_tx(tx_id)
+
+
+def get_tx(tx_id: int) -> dict | None:
+    row = one("SELECT * FROM wallet_tx WHERE id=?", (tx_id,))
+    return dict(row) if row else None
+
+
+def charge_reseller(rid: int, amount: int, note: str = "") -> bool:
+    """کسر از کیف پول رزیلر (اگر موجودی کافی باشد)."""
+    amount = int(amount)
+    if amount <= 0:
+        return True
+    if reseller_balance(rid) < amount:
+        return False
+    add_balance(rid, -amount, kind="purchase", note=note, status="approved")
+    return True
+
+
+def reseller_user_summary(rid: int) -> dict:
+    users = [dict(r) for r in query("SELECT * FROM users WHERE reseller_id=?", (rid,))]
+    return {
+        "users": len(users),
+        "used": sum(int(u.get("used_bytes") or 0) for u in users),
+        "active": len([u for u in users if user_status(u) == "active"]),
     }

@@ -11,7 +11,35 @@ from . import settings
 from .policy import policy
 from .vless import CMD_TCP, CMD_UDP, RESPONSE_HEADER, NeedMoreData, VlessError, VlessRequest, parse_request
 
-BUFFER = 256 * 1024
+BUFFER = settings.READ_BUFFER
+
+# نرخ‌های تطبیقی برای درین (شبیه AIMD در TCP)
+FLOW_MIN_HW = 256 * 1024
+FLOW_MAX_HW = 8 * 1024 * 1024
+FLOW_START_HW = settings.DRAIN_HIGH_WATER
+
+
+class AdaptiveFlow:
+    """آستانه‌ی درین را با سرعت واقعی مسیر تنظیم می‌کند: سریع‌تر → بافر بزرگ‌تر."""
+
+    __slots__ = ("high_water", "last_drain_ms")
+
+    def __init__(self) -> None:
+        self.high_water = FLOW_START_HW
+        self.last_drain_ms = 0.0
+
+    def should_drain(self, pending: int) -> bool:
+        return pending > self.high_water
+
+    async def drain(self, writer: asyncio.StreamWriter) -> None:
+        t0 = asyncio.get_event_loop().time()
+        await writer.drain()
+        elapsed_ms = (asyncio.get_event_loop().time() - t0) * 1000
+        self.last_drain_ms = elapsed_ms
+        if elapsed_ms < 2.0:
+            self.high_water = min(FLOW_MAX_HW, int(self.high_water * 1.5) + 65536)
+        elif elapsed_ms > 25.0:
+            self.high_water = max(FLOW_MIN_HW, self.high_water // 2)
 
 SendFn = Callable[[bytes], Awaitable[None]]
 
@@ -32,8 +60,9 @@ def tune_socket(writer: asyncio.StreamWriter) -> None:
         return
     with contextlib.suppress(OSError):
         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-    with contextlib.suppress(OSError):
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 1024 * 1024)
+    for opt in (socket.SO_SNDBUF, socket.SO_RCVBUF):
+        with contextlib.suppress(OSError):
+            sock.setsockopt(socket.SOL_SOCKET, opt, 2 * 1024 * 1024)
 
 
 async def open_tcp(address: str, port: int) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
@@ -212,6 +241,7 @@ async def run_tunnel(channel: ClientChannel, request: VlessRequest, ip: str = "?
             await writer.drain()
 
     downlink_first = True
+    flow = AdaptiveFlow()
 
     async def pump_up() -> None:
         try:
@@ -227,8 +257,8 @@ async def run_tunnel(channel: ClientChannel, request: VlessRequest, ip: str = "?
                 policy.total_requests += 1
                 await policy.throttle(uuid, len(chunk))
                 writer.write(chunk)
-                if writer.transport.get_write_buffer_size() > BUFFER:
-                    await writer.drain()
+                if flow.should_drain(writer.transport.get_write_buffer_size()):
+                    await flow.drain(writer)
         except Exception as exc:
             policy.errors += 1
             policy.push_event(f"خطای آپلینک {name}: {type(exc).__name__}", "error")

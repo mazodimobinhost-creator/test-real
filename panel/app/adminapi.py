@@ -14,6 +14,11 @@ from .settings import APP_VERSION
 router = APIRouter(prefix="/api/admin")
 COOKIE = "mlp_sid"
 
+# ── محدودسازی تلاش ورود (brute-force) ──
+_LOGIN_FAILS: dict[str, list] = {}
+LOGIN_LIMIT = 8
+LOGIN_WINDOW = 600.0
+
 
 def require_admin(mlp_sid: str | None = Cookie(default=None)) -> dict:
     session = store.get_session(mlp_sid or "")
@@ -27,17 +32,52 @@ class LoginIn(BaseModel):
     password: str = ""
 
 
+def _client_ip(request: Request) -> str:
+    fwd = request.headers.get("x-forwarded-for")
+    if fwd:
+        return fwd.split(",")[0].strip()
+    return request.client.host if request.client else "?"
+
+
+def _login_blocked(ip: str) -> bool:
+    import time as _t
+
+    rec = _LOGIN_FAILS.get(ip)
+    if not rec:
+        return False
+    count, first = rec
+    if _t.time() - first > LOGIN_WINDOW:
+        _LOGIN_FAILS.pop(ip, None)
+        return False
+    return count >= LOGIN_LIMIT
+
+
+def _login_failed(ip: str) -> None:
+    import time as _t
+
+    now = _t.time()
+    count, first = _LOGIN_FAILS.get(ip, (0, now))
+    if now - first > LOGIN_WINDOW:
+        count, first = 0, now
+    _LOGIN_FAILS[ip] = (count + 1, first)
+
+
 @router.post("/login")
 async def login(body: LoginIn, request: Request):
+    ip = _client_ip(request)
+    if _login_blocked(ip):
+        raise HTTPException(status_code=429, detail="تلاش‌های ناموفق زیاد بود؛ چند دقیقه بعد امتحان کن")
     settings = store.all_settings()
     expected_user = (settings.get("admin_user") or "admin").strip()
     if body.username.strip() and body.username.strip() != expected_user:
         store.log_event("auth", f"تلاش ورود با نام کاربری نادرست: {body.username[:30]}", "warn")
         raise HTTPException(status_code=401, detail="نام کاربری یا رمز نادرست است")
     if not verify_password(body.password, settings.get("admin_password_hash") or ""):
-        store.log_event("auth", f"تلاش ناموفق ورود از {request.client.host if request.client else '?'}", "warn")
+        _login_failed(ip)
+        store.log_event("auth", f"تلاش ناموفق ورود از {ip}", "warn")
         raise HTTPException(status_code=401, detail="نام کاربری یا رمز نادرست است")
-    sid = store.create_session(request.client.host if request.client else "")
+    _LOGIN_FAILS.pop(ip, None)
+    sid = store.create_session(ip)
     store.log_event("auth", "ورود موفق به پنل", "ok")
     resp = {"ok": True, "sid": sid}
     from fastapi.responses import JSONResponse
@@ -95,6 +135,7 @@ class LocationIn(BaseModel):
     xhttp_path: str = "/xhttp"
     tcp_port: int = 0
     cf_host: str = ""
+    engine: str = "python"
     enabled: bool = True
     sort: int = 0
     note: str = ""
@@ -151,6 +192,7 @@ async def locations_rotate(loc_id: int, mlp_sid: str | None = Cookie(default=Non
 class UserIn(BaseModel):
     id: int | None = None
     name: str = ""
+    reseller_id: int = 0
     limit_gb: float = 0
     days: int = 0
     extend: bool = False
@@ -192,6 +234,7 @@ async def users_save(body: UserIn, mlp_sid: str | None = Cookie(default=None)):
             "enabled": body.enabled,
             "note": body.note,
             "telegram_id": body.telegram_id,
+            "reseller_id": body.reseller_id,
             "locations": body.locations,
         }
     )
@@ -252,6 +295,7 @@ class PlanIn(BaseModel):
     speed_kbps: int = 0
     enabled: bool = True
     sort: int = 0
+    reseller_price: int = 0
 
 
 @router.get("/plans")
@@ -312,6 +356,22 @@ async def orders_reject(order_id: int, reason: str = "رد شد", mlp_sid: str |
 # ───────────────────────────── تنظیمات ─────────────────────────────────────
 class SettingsIn(BaseModel):
     panel_title: str | None = None
+    site_mode: str | None = None
+    brand_name: str | None = None
+    brand_slogan: str | None = None
+    brand_color: str | None = None
+    brand_color2: str | None = None
+    brand_logo: str | None = None
+    brand_hero: str | None = None
+    brand_features: str | None = None
+    brand_card_number: str | None = None
+    brand_card_holder: str | None = None
+    brand_contact: str | None = None
+    marketing_show_plans: str | None = None
+    announce_bar: str | None = None
+    custom_domain: str | None = None
+    secret_path: str | None = None
+    tutorial_enabled: str | None = None
     config_title: str | None = None
     support_url: str | None = None
     public_base_url: str | None = None
@@ -394,3 +454,168 @@ async def bot_test(mlp_sid: str | None = Cookie(default=None)):
     from .bot import bot_selfcheck
 
     return await bot_selfcheck()
+
+
+# ───────────────────────────── رزیلرها ─────────────────────────────────────
+class ResellerIn(BaseModel):
+    id: int | None = None
+    name: str = ""
+    username: str = ""
+    password: str = ""
+    price_gb: int = 0
+    price_day: int = 0
+    min_gb: float = 1
+    enabled: bool = True
+    note: str = ""
+
+
+@router.get("/resellers")
+async def resellers_list(mlp_sid: str | None = Cookie(default=None)):
+    require_admin(mlp_sid)
+    out = []
+    for r in store.list_resellers():
+        r.pop("password_hash", None)
+        r["summary"] = store.reseller_user_summary(int(r["id"]))
+        out.append(r)
+    return {"ok": True, "resellers": out, "plans": store.list_plans()}
+
+
+@router.post("/resellers")
+async def resellers_save(body: ResellerIn, mlp_sid: str | None = Cookie(default=None)):
+    require_admin(mlp_sid)
+    rid = store.save_reseller(body.model_dump())
+    store.log_event("reseller", f"رزیلر «{body.name or body.username}» ذخیره شد", "ok")
+    reseller = store.get_reseller(rid) or {}
+    reseller.pop("password_hash", None)
+    return {"ok": True, "reseller": reseller}
+
+
+@router.delete("/resellers/{rid}")
+async def resellers_delete(rid: int, mlp_sid: str | None = Cookie(default=None)):
+    require_admin(mlp_sid)
+    store.delete_reseller(rid)
+    return {"ok": True}
+
+
+class TopupIn(BaseModel):
+    reseller_id: int
+    amount: int
+    note: str = ""
+    receipt: str = ""
+    status: str = "approved"
+
+
+@router.post("/resellers/topup")
+async def resellers_topup(body: TopupIn, mlp_sid: str | None = Cookie(default=None)):
+    require_admin(mlp_sid)
+    tx_id = store.add_balance(body.reseller_id, body.amount, "topup", body.note, body.receipt, body.status)
+    store.log_event("wallet", f"شارژ {body.amount:,} تومانی برای رزیلر #{body.reseller_id}", "ok")
+    return {"ok": True, "tx": store.get_tx(tx_id), "balance": store.reseller_balance(body.reseller_id)}
+
+
+@router.get("/wallet")
+async def wallet_list(status: str | None = None, mlp_sid: str | None = Cookie(default=None)):
+    require_admin(mlp_sid)
+    txs = store.list_wallet_tx(status)
+    return {"ok": True, "txs": txs, "resellers": store.list_resellers()}
+
+
+@router.post("/wallet/{tx_id}/{action}")
+async def wallet_decide(tx_id: int, action: str, mlp_sid: str | None = Cookie(default=None)):
+    require_admin(mlp_sid)
+    if action not in ("approve", "reject"):
+        raise HTTPException(status_code=400, detail="action must be approve|reject")
+    status = "approved" if action == "approve" else "rejected"
+    tx = store.set_tx_status(tx_id, status, "پنل وب")
+    if not tx:
+        raise HTTPException(status_code=404, detail="تراکنش پیدا نشد")
+    await _notify_wallet_decided(tx_id)
+    return {"ok": True, "tx": tx}
+
+
+async def _notify_wallet_decided(tx_id: int) -> None:
+    from .bot import send
+
+    tx = store.get_tx(tx_id) or {}
+    reseller = store.get_reseller(int(tx.get("reseller_id") or 0)) or {}
+    tg = str(reseller.get("note") or "")
+    if not (tg.isdigit() and len(tg) > 5):
+        return
+    if tx.get("status") == "approved":
+        await send(tg, f"✅ شارژ کیف پول شما تأیید شد.\nموجودی جدید: {store.reseller_balance(int(reseller['id'])):,} تومان")
+    else:
+        await send(tg, "❌ درخواست شارژ شما تأیید نشد. با پشتیبانی در تماس باشید.")
+
+
+# ───────────────────────────── اعلان‌ها ────────────────────────────────────
+class AnnounceIn(BaseModel):
+    id: int | None = None
+    title: str = ""
+    body: str = ""
+    level: str = "info"
+    enabled: bool = True
+
+
+@router.get("/announcements")
+async def announcements_list(mlp_sid: str | None = Cookie(default=None)):
+    require_admin(mlp_sid)
+    return {"ok": True, "announcements": store.list_announcements(), "bar": store.get_setting("announce_bar")}
+
+
+@router.post("/announcements")
+async def announcements_save(body: AnnounceIn, mlp_sid: str | None = Cookie(default=None)):
+    require_admin(mlp_sid)
+    aid = store.save_announcement(body.model_dump())
+    return {"ok": True, "announcement": store.get_announcement(aid)}
+
+
+@router.delete("/announcements/{aid}")
+async def announcements_delete(aid: int, mlp_sid: str | None = Cookie(default=None)):
+    require_admin(mlp_sid)
+    store.delete_announcement(aid)
+    return {"ok": True}
+
+
+# ───────────────────────────── آموزش راه‌اندازی ─────────────────────────────
+@router.get("/tutorial")
+async def tutorial_get(mlp_sid: str | None = Cookie(default=None)):
+    require_admin(mlp_sid)
+    from . import tutorial
+
+    return {
+        "ok": True,
+        "steps": [{k: v for k, v in s.items() if k != "files"} for s in tutorial.steps()],
+        "files": tutorial.files_payload(),
+        "installer": tutorial.installer_command(),
+        "box_ip": store.public_base(),
+        "secret_path": store.secret_path(),
+    }
+
+
+class TutorialIn(BaseModel):
+    key: str
+    title: str = ""
+    time: str = ""
+    text: str = ""
+    tip: str = ""
+    code: str = ""
+    reset: bool = False
+
+
+@router.post("/tutorial")
+async def tutorial_save(body: TutorialIn, mlp_sid: str | None = Cookie(default=None)):
+    require_admin(mlp_sid)
+    from . import tutorial
+
+    if body.reset:
+        tutorial.reset_step(body.key)
+    else:
+        tutorial.save_step(body.key, body.model_dump())
+    return {"ok": True}
+
+
+# ───────────────────────────── سلامت و نسخه ────────────────────────────────
+@router.get("/brand")
+async def brand_get(mlp_sid: str | None = Cookie(default=None)):
+    require_admin(mlp_sid)
+    return {"ok": True, "brand": store.brand(), "secret_path": store.secret_path()}

@@ -338,6 +338,7 @@ async def main() -> int:
             "MLP_DECOY": "auto",
             "MLP_SYNC_INTERVAL": "3",
             "MLP_REPORT_INTERVAL": "3",
+            "MLP_GEO_ENABLED": "0",   # geo از داخل تست تزریق می‌شود تا نتیجه قطعی باشد
             "PORT": str(NODE_PORT),
         }
     )

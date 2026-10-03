@@ -14,7 +14,7 @@ jobs:
         with:
           python-version: "3.12"
       - name: install deps
-        run: pip install -r panel/requirements.txt
+        run: pip install -r panel/requirements.txt -r node/requirements.txt
       - name: setup files bundle is in sync
         run: python tools/gen_setup_files.py --check
 
@@ -22,4 +22,6 @@ jobs:
         run: |
           python -m compileall -q panel/app node/app
       - name: end-to-end test (panel + node + real VLESS client)
-        run: python tools/e2e_test.py
+        run: |
+          python -c "import websockets, httpx, fastapi, uvicorn; print('deps ok')"
+          python tools/e2e_test.py

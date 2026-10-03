@@ -811,17 +811,19 @@ class AutoDeployIn(BaseModel):
 
 
 @router.get("/auto-deploy/plan")
-async def auto_deploy_plan(repo: str = "", mlp_sid: str | None = Cookie(default=None)):
+async def auto_deploy_plan(repo: str = "", branch: str = "", mlp_sid: str | None = Cookie(default=None)):
     require_admin(mlp_sid)
     from . import railway
 
     saved = store.get_setting("auto_deploy_repo") or ""
+    saved_branch = store.get_setting("auto_deploy_branch") or ""
     configured = store.get_setting("auto_deploy_token") or ""
     return {
         "ok": True,
-        "plan": railway.deploy_plan(repo or saved),
+        "plan": railway.deploy_plan(repo or saved, branch=branch or saved_branch),
         "has_token": bool(configured),
         "saved_repo": saved,
+        "saved_branch": saved_branch,
         "regions": geoinfo.REGION_CHOICES,
         "existing": store.all_settings().get("auto_deploy_result", ""),
         "ssh_note": "بدون توکن هم می‌توانی سرویس‌ها را دستی بسازی؛ ولی با توکن، همه‌چیز خودکار ساخته می‌شود.",
@@ -857,6 +859,7 @@ async def auto_deploy_run(body: AutoDeployIn, mlp_sid: str | None = Cookie(defau
     public = store.public_base()
     store.set_setting("auto_deploy_token", token)
     store.set_setting("auto_deploy_repo", repo)
+    store.set_setting("auto_deploy_branch", body.branch or "")
     store.log_event("deploy", "راه‌اندازی خودکار روی Railway شروع شد", "info")
     result = await railway.auto_deploy(
         token, repo=repo, branch=body.branch or "main", project_name=body.project_name,

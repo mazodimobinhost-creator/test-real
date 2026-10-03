@@ -731,6 +731,9 @@ function pageAuto() {
     '<label>توکن Railway</label><input id="ad_token" style="direction:ltr;text-align:left" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx">' +
     '<div class="row"><button class="ghost" onclick="adVerify()">تست توکن</button></div>' +
     '<label>ریپو (فورک‌شده)</label><input id="ad_repo" style="direction:ltr;text-align:left" value="' + esc((plan.repo || '')) + '" placeholder="username/repo">' +
+    '<label>شاخه (Branch) — حتماً شاخه‌ای که کد داخلش است</label>' +
+    '<input id="ad_branch" style="direction:ltr;text-align:left" value="' + esc((plan.branch || 'main')) + '" placeholder="main">' +
+    '<div class="mut" style="color:#f59e0b">' + esc(((plan.detected || {}).source === 'Railway env' ? 'تشخیص خودکار از خودِ Railway: ' + (plan.detected || {}).repo + '@' + (plan.detected || {}).branch : 'شاخه‌ی پیش‌فرض main است؛ اگر کد در شاخه‌ی دیگری است عوضش کن.')) + '</div>' +
     '<label>نام پروژه</label><input id="ad_project" value="mlp" placeholder="mlp">' +
     '<label>رمز ادمین (خالی = تصادفی و امن)</label><input id="ad_pass">' +
     '<h3 style="font-size:13px;margin-top:14px">لوکیشن‌های اولیه</h3>' +
@@ -738,6 +741,8 @@ function pageAuto() {
     '<button class="ghost sm" onclick="adAddNode()">+ لوکیشن</button>' +
     '<div class="row" style="margin-top:12px"><button class="ok" onclick="adRun()">همه‌چیز را بساز</button>' +
     '<a href="/" target="_blank"><button class="ghost">پیش‌نمایش سایت</button></a></div>' +
+    '<div class="tip">اگر خودت سرویس‌ها را دستی می‌سازی: در Railway → Settings → Source شاخه را عوض کن و ' +
+    'Root Directory پنل = <b>panel</b> و هر نود = <b>node</b>. اگر از ریشه‌ی ریپو بسازی، Dockerfile ریشه همان پنل را می‌سازد.</div>' +
     '<div class="mut" style="margin-top:8px">پورت‌ها: پنل روی <b>8080</b> و هر نود روی <b>8080</b> (Railway خودکار تشخیص می‌دهد). ' +
     'بدون توکن هم می‌توانی سرویس‌ها را دستی بسازی — گام‌های ۲ و ۳ در تب «آموزش راه‌اندازی».</div></div>' +
     '<div class="card"><h3>📋 چیزی که ساخته می‌شود</h3>' +
@@ -778,7 +783,8 @@ async function adRun() {
   toast('در حال ساخت… چند دقیقه طول می‌کشد');
   try {
     const d = await api('/api/admin/auto-deploy/run', 'POST', { token: $('ad_token').value, repo: $('ad_repo').value,
-      project_name: $('ad_project').value, admin_password: $('ad_pass').value, node_specs: nodes, wait: true });
+      project_name: $('ad_project').value, admin_password: $('ad_pass').value,
+      branch: ($('ad_branch') ? $('ad_branch').value.trim() : 'main') || 'main', node_specs: nodes, wait: true });
     const lines = (d.steps || []).map(s => '<div class="mut">' + (s.level === 'error' ? '❌ ' : (s.level === 'warn' ? '⚠️ ' : '✅ ')) + esc(s.message) + '</div>').join('');
     openModal('<h3>' + (d.ok ? 'راه‌اندازی موفق 🎉' : 'راه‌اندازی نیمه‌کاره') + '</h3>' + lines +
       (d.panel_url ? '<div class="tip">پنل: <a href="' + esc(d.panel_url) + '" target="_blank">' + esc(d.panel_url) + '</a><br>' +
@@ -793,6 +799,8 @@ async function loadAuto() {
   const d = await api('/api/admin/auto-deploy/plan');
   S.data.plan = d.plan || {}; S.data.regions = d.regions || []; S.data.base = (d.plan || {}).panel_url || '';
   if (d.saved_repo) S.data.plan.repo = d.saved_repo;
+  if (d.saved_branch) S.data.plan.branch = d.saved_branch;
+  if ((d.plan || {}).branch_warning) S.data.plan.detected = (d.plan || {}).detected || {};
 }
 
 function pageSetup() {

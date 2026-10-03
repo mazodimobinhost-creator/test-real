@@ -1082,6 +1082,11 @@ async def main() -> int:
         check(r_plan.status_code == 200 and plan.get("panel", {}).get("port") == 8080
               and plan.get("panel", {}).get("root_directory") == "panel" and len(regions) >= 8,
               "نقشه‌ی راه‌اندازی خودکار (سرویس‌ها + ریجن‌ها)", f"{len(regions)} ریجن")
+        check(bool(plan.get("branch")) and bool(plan.get("branch_warning")) and "detected" in plan,
+              "شاخه‌ی دیپلوی در نقشه مشخص و هشدار داده می‌شود", f"branch={plan.get('branch')}")
+        check((ROOT / "Dockerfile").exists() and (ROOT / "railway.toml").exists()
+              and "panel/requirements.txt" in (ROOT / "Dockerfile").read_text(encoding="utf-8"),
+              "دیپلوی از ریشه‌ی ریپو هم پنل را می‌سازد (Dockerfile ریشه)")
 
         anon = _httpx3.AsyncClient(timeout=10.0)
         r_anon = await anon.post(f"http://127.0.0.1:{PANEL_PORT}/api/admin/auto-deploy/run",

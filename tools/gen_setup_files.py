@@ -17,6 +17,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 
 FILES = [
+    "Dockerfile",
+    "railway.toml",
     "panel/Dockerfile",
     "panel/railway.toml",
     "panel/requirements.txt",

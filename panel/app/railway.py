@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import secrets
 import time
 
@@ -236,6 +237,20 @@ class Railway:
         return False
 
 
+def detected_repo() -> str:
+    """ریپویی که خودِ پنل از آن دیپلوی شده (Railway این‌ها را تزریق می‌کند)."""
+    owner = os.environ.get("RAILWAY_GIT_REPO_OWNER", "").strip()
+    name = os.environ.get("RAILWAY_GIT_REPO_NAME", "").strip()
+    if owner and name:
+        return f"{owner}/{name}"
+    return os.environ.get("MLP_REPO", "").strip() or DEFAULT_REPO
+
+
+def detected_branch() -> str:
+    """شاخه‌ای که کد فعلی از آن آمده — مهم: اگر main خالی باشد، همین باعث خطای بیلد می‌شود."""
+    return (os.environ.get("RAILWAY_GIT_BRANCH") or "").strip() or "main"
+
+
 def random_password(length: int = 14) -> str:
     alphabet = "abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789"
     return "".join(secrets.choice(alphabet) for _ in range(length))
@@ -261,7 +276,8 @@ async def auto_deploy(
 
     `node_specs` نمونه: `[{"name": "Germany", "flag": "🇩🇪", "region": "europe-west3"}]`
     """
-    repo = (repo or DEFAULT_REPO).strip().replace("https://github.com/", "").strip("/")
+    repo = (repo or detected_repo()).strip().replace("https://github.com/", "").strip("/")
+    branch = (branch or detected_branch()).strip() or "main"
     password = admin_password or random_password()
     project_name = project_name or f"mlp-{secrets.token_hex(2)}"
     steps: list[dict] = []
@@ -382,15 +398,22 @@ async def auto_deploy(
         await client.close()
 
 
-def deploy_plan(repo: str = "", node_specs: list[dict] | None = None) -> dict:
+def deploy_plan(repo: str = "", node_specs: list[dict] | None = None, branch: str = "") -> dict:
     """پیش‌نمایش کاری که قرار است انجام شود (برای نمایش در پنل قبل از اجرا)."""
-    repo = (repo or DEFAULT_REPO).strip().replace("https://github.com/", "").strip("/")
+    repo = (repo or detected_repo()).strip().replace("https://github.com/", "").strip("/")
+    branch = (branch or detected_branch()).strip() or "main"
     specs = node_specs or [
         {"name": "Germany", "flag": "🇩🇪", "region": "europe-west3"},
         {"name": "Netherlands", "flag": "🇳🇱", "region": "europe-west4"},
     ]
     return {
         "repo": repo,
+        "branch": branch,
+        "detected": {
+            "repo": detected_repo(),
+            "branch": detected_branch(),
+            "source": "Railway env" if os.environ.get("RAILWAY_GIT_REPO_NAME") else "پیش‌فرض",
+        },
         "panel": {
             "service": "panel", "root_directory": "panel", "port": 8080,
             "volume": "/data", "dockerfile": "panel/Dockerfile",
@@ -404,7 +427,11 @@ def deploy_plan(repo: str = "", node_specs: list[dict] | None = None) -> dict:
             for spec in specs
         ],
         "estimated_minutes": 3 + len(specs),
-        "note": "همه‌ی سرویس‌ها از همان ریپوی فورک‌شده ساخته می‌شوند؛ نیازی به کار دستی نیست.",
+        "note": "همه‌ی سرویس‌ها از همان ریپو و همان شاخه‌ی این پنل ساخته می‌شوند؛ نیازی به کار دستی نیست.",
+        "branch_warning": (
+            f"شاخه‌ی انتخاب‌شده «{branch}» است. اگر در این شاخه کد نباشد و فقط README داشته باشد، "
+            "Railway با خطای «failed to prepare the build» بالا نمی‌آید — شاخه‌ای را بده که کد داخلش است."
+        ),
     }
 
 

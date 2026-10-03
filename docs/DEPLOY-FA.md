@@ -31,6 +31,10 @@
 بالا آمدن لازم دارد: یک **Volume روی `/data`** و یک **`MLP_ADMIN_PASSWORD`** (و اگر دامنه‌ی اختصاصی داری، `MLP_PUBLIC_URL`).
 سرویس نود هم فقط `MLP_PANEL_URL` و `MLP_NODE_TOKEN` می‌خواهد.
 
+۰. در سرویس Railway → **Settings → Source** شاخه‌ای که کد داخلش است را انتخاب کن (شاخه‌ی `main` اگر خالی باشد → خطای
+   `Railpack failed to prepare the build` / «The app contents that Railpack analyzed contains: README.md»).
+   برای پنل **Root Directory = `panel`** و برای هر نود **Root Directory = `node`**؛ اگر Root Directory را خالی بگذاری،
+   `Dockerfile` ریشه پنل را می‌سازد.
 ۱. در Railway → **Account → Tokens → Create Token** یک توکن بساز و کپی کن.
 ۲. در پنل → تب **«راه‌اندازی خودکار»** → توکن را بچسبان → **«تست توکن»** (نام حساب را نشان می‌دهد).
 ۳. ریپوی فورک‌شده (`username/repo`) و نام پروژه را بگذار؛ رمز ادمین را خالی بگذار تا **رمز تصادفی امن** ساخته شود.

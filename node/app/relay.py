@@ -8,6 +8,7 @@ import socket
 from typing import Awaitable, Callable
 
 from . import settings
+from .egress import egress
 from .policy import policy
 from .vless import CMD_TCP, CMD_UDP, RESPONSE_HEADER, NeedMoreData, VlessError, VlessRequest, parse_request
 
@@ -66,9 +67,8 @@ def tune_socket(writer: asyncio.StreamWriter) -> None:
 
 
 async def open_tcp(address: str, port: int) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
-    return await asyncio.wait_for(
-        asyncio.open_connection(host=address, port=port), timeout=settings.CONNECT_TIMEOUT
-    )
+    """اتصال به مقصد از مسیر خروج این لوکیشن (مستقیم / پروکسی IP / تانل)."""
+    return await egress.connect(address, port, timeout=settings.CONNECT_TIMEOUT)
 
 
 class UdpTunnel:
@@ -203,7 +203,10 @@ async def run_tunnel(channel: ClientChannel, request: VlessRequest, ip: str = "?
             reader = None
     except Exception as exc:
         policy.errors += 1
-        policy.push_event(f"اتصال به {request.address}:{request.port} ناموفق: {type(exc).__name__}", "error")
+        policy.push_event(
+            f"اتصال به {request.address}:{request.port} ناموفق از مسیر «{egress.active or egress.mode}»: {type(exc).__name__}",
+            "error",
+        )
         await channel.close("connect failed")
         return
 

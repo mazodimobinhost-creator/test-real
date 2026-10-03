@@ -7,7 +7,8 @@ import logging
 
 import httpx
 
-from . import settings
+from . import decoy, settings
+from .egress import egress
 from .policy import policy
 
 logger = logging.getLogger("mlp.node")
@@ -54,7 +55,8 @@ async def sync_once() -> bool:
         return False
     url = f"{settings.PANEL_URL}/api/node/sync"
     try:
-        resp = await http().post(url, json={"status": policy.status(), "version": settings.APP_VERSION})
+        payload = {"status": policy.status(), "version": settings.APP_VERSION, "egress": egress.status()}
+        resp = await http().post(url, json=payload)
         if resp.status_code != 200:
             _last_error = f"HTTP {resp.status_code}: {resp.text[:160]}"
             _panel_ok = False
@@ -66,6 +68,21 @@ async def sync_once() -> bool:
             return False
         before = len(policy.users)
         policy.apply_bundle(bundle)
+        node_conf = bundle.get("node") or {}
+        wanted_decoy = str(node_conf.get("decoy") or "").strip().lower()
+        if wanted_decoy and decoy.KIND_OVERRIDE != wanted_decoy:
+            decoy.set_kind(wanted_decoy)
+            policy.push_event(f"سایت پوششی به «{wanted_decoy}» تغییر کرد", "info")
+        conf = node_conf.get("egress")
+        if isinstance(conf, dict) and conf:
+            before_mode = (egress.mode, egress.configured(), len(egress.paths))
+            egress.apply_config(conf)
+            after_mode = (egress.mode, egress.configured(), len(egress.paths))
+            if before_mode != after_mode:
+                policy.push_event(
+                    f"مسیر خروج به‌روزرسانی شد: {egress.mode} · {'/'.join(p.label for p in egress.paths) or 'مستقیم'}",
+                    "info",
+                )
         _panel_ok = True
         _last_error = ""
         if before != len(policy.users):
@@ -86,7 +103,12 @@ async def report_once() -> bool:
     if not usage and not policy.events:
         # چیزی برای گفتن نیست، ولی heartbeat وضعیت را می‌فرستیم
         pass
-    payload = {"usage": usage, "status": policy.status(), "events": policy.drain_events()}
+    payload = {
+        "usage": usage,
+        "status": policy.status(),
+        "events": policy.drain_events(),
+        "egress": egress.status(),
+    }
     try:
         resp = await http().post(f"{settings.PANEL_URL}/api/node/report", json=payload)
         if resp.status_code != 200:

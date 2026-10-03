@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import shutil
@@ -108,11 +109,12 @@ def build_vless_header(uid: str, host: str, port: int, command: int = 1) -> byte
     return bytes(out)
 
 
-async def vless_ws_request(uuid_str: str, target_host: str, target_port: int, payload: bytes, timeout: float = 12.0):
+async def vless_ws_request(uuid_str: str, target_host: str, target_port: int, payload: bytes,
+                           timeout: float = 12.0, node_port: int | None = None, ws_path: str = "/ws"):
     """یک درخواست از داخل تونل: هدر VLESS + payload؛ پاسخ را برمی‌گرداند."""
     import websockets
 
-    uri = f"ws://127.0.0.1:{NODE_PORT}/ws"
+    uri = f"ws://127.0.0.1:{node_port or NODE_PORT}{ws_path}"
     async with websockets.connect(uri, max_size=None, open_timeout=8) as ws:
         await ws.send(build_vless_header(uuid_str, target_host, target_port) + payload)
         chunks = []
@@ -129,10 +131,114 @@ async def vless_ws_request(uuid_str: str, target_host: str, target_port: int, pa
     return b"".join(chunks)
 
 
+
+
+# ═════════════ فوترهای تست مسیر خروج (پروکسی IP / تانل) ═════════════
+class MiniSocks5:
+    """پروکسی SOCKS5 حداقلی برای تست: هر اتصال را به مقصد واقعی پل می‌زند."""
+
+    def __init__(self, port: int, user: str = "", password: str = "") -> None:
+        self.port = port
+        self.user = user
+        self.password = password
+        self.server: asyncio.AbstractServer | None = None
+        self.connections = 0
+        self.targets: list[tuple[str, int]] = []
+
+    async def start(self) -> None:
+        self.server = await asyncio.start_server(self._handle, "127.0.0.1", self.port)
+
+    async def stop(self) -> None:
+        if self.server:
+            self.server.close()
+            with contextlib.suppress(Exception):
+                await self.server.wait_closed()
+
+    async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        up_reader = up_writer = None
+        try:
+            greeting = await reader.readexactly(2)
+            methods = await reader.readexactly(greeting[1])
+            if self.user:
+                if 2 not in methods:
+                    writer.write(b"\x05\xff")
+                    await writer.drain()
+                    return
+                writer.write(b"\x05\x02")
+                await writer.drain()
+                version = await reader.readexactly(1)
+                ulen = (await reader.readexactly(1))[0]
+                user = (await reader.readexactly(ulen)).decode()
+                plen = (await reader.readexactly(1))[0]
+                password = (await reader.readexactly(plen)).decode()
+                if user != self.user or password != self.password:
+                    writer.write(b"\x01\x01")
+                    await writer.drain()
+                    return
+                writer.write(b"\x01\x00")
+            else:
+                writer.write(b"\x05\x00")
+            await writer.drain()
+
+            head = await reader.readexactly(4)
+            atyp = head[3]
+            if atyp == 1:
+                host = ".".join(str(b) for b in await reader.readexactly(4))
+            elif atyp == 3:
+                length = (await reader.readexactly(1))[0]
+                host = (await reader.readexactly(length)).decode()
+            else:
+                raw = await reader.readexactly(16)
+                host = ":".join(f"{raw[i]:02x}{raw[i + 1]:02x}" for i in range(0, 16, 2))
+            port = int.from_bytes(await reader.readexactly(2), "big")
+            self.targets.append((host, port))
+            self.connections += 1
+            up_reader, up_writer = await asyncio.open_connection(host, port)
+            writer.write(b"\x05\x00\x00\x01" + b"\x00\x00\x00\x00" + b"\x00\x00")
+            await writer.drain()
+
+            async def pump(src, dst, close_after=False):
+                try:
+                    while True:
+                        chunk = await src.read(65536)
+                        if not chunk:
+                            break
+                        dst.write(chunk)
+                        await dst.drain()
+                except Exception:
+                    pass
+                finally:
+                    with contextlib.suppress(Exception):
+                        dst.close()
+
+            await asyncio.gather(
+                pump(reader, up_writer), pump(up_reader, writer), return_exceptions=True
+            )
+        except Exception:
+            pass
+        finally:
+            for stream in (writer, up_writer):
+                with contextlib.suppress(Exception):
+                    stream.close()
+
+
+async def open_tunnel(port: int, uuid_str: str, target_host: str, target_port: int, payload: bytes,
+                      path: str = "/ws", host_header: str = "node.test", timeout: float = 12.0):
+    """تانل VLESS/WS کامل روی یک نود مشخص (برای تست مسیرهای خروج)."""
+    return await vless_ws_request(uuid_str, target_host, target_port, payload,
+                                  timeout=timeout, node_port=port, ws_path=path)
+
+
 async def main() -> int:
     global PANEL_PORT, NODE_PORT
     PANEL_PORT = free_port()
     NODE_PORT = free_port()
+    node_proxy_port = free_port()
+    node_auto_port = free_port()
+    node_chain_port = free_port()
+    node_tcp_port = free_port()
+    while node_tcp_port in (node_tcp_port + 1,):
+        node_tcp_port = free_port()
     data_dir = Path("/tmp/mlp-e2e")
     shutil.rmtree(data_dir, ignore_errors=True)
     data_dir.mkdir(parents=True, exist_ok=True)
@@ -559,7 +665,9 @@ async def main() -> int:
     _, tut = await http_json(f"http://127.0.0.1:{PANEL_PORT}/api/admin/tutorial", cookies=cookies)
     steps = tut.get("steps", [])
     files = tut.get("files", {})
-    check(len(steps) >= 7 and all(s.get("code") for s in steps), "آموزش گام‌به‌گام داخل پنل", f"{len(steps)} گام")
+    check(len(steps) >= 8 and all(s.get("code") for s in steps), "آموزش گام‌به‌گام داخل پنل", f"{len(steps)} گام")
+    check(any(s["key"] == "step_egress" and "پروکسی IP" in s["title"] for s in steps),
+          "گام آموزش «پروکسی IP / تانل» در آموزش پنل")
     check(len(files) >= 10 and any("Dockerfile.xray" in k for k in files),
           "فایل‌های راه‌اندازی برای دانلود آماده‌اند", f"{len(files)} فایل")
     check("MLP_NODE_TOKEN" in files.get("node/.env.example", "") or "MLP_NODE_TOKEN" in files.get("node/Dockerfile", ""),
@@ -612,6 +720,259 @@ async def main() -> int:
     from node.app.main import xray_active  # noqa: E402
 
     check(xray_active() is False, "نود بدون باینری روی موتور پایتون می‌ماند")
+
+
+    # ── مسیر خروج: پروکسی IP (SOCKS5) ──
+    print(f"{YELLOW}==> تست مسیر خروج: پروکسی IP (SOCKS5){RESET}")
+    socks = MiniSocks5(free_port(), user="mlp", password="secret")
+    await socks.start()
+
+    resp, loc_proxy = await http_json(
+        f"http://127.0.0.1:{PANEL_PORT}/api/admin/locations", "POST",
+        {"name": "ProxyExit", "flag": "🇹🇷", "region": "proxy-ip", "host": f"127.0.0.1:{NODE_PORT}2",
+         "transports": ["ws"], "egress_mode": "proxy",
+         "egress": {"proxy": {"type": "socks5h", "list": [f"mlp:secret@127.0.0.1:{socks.port}"], "rotate": "fastest"}}},
+        cookies,
+    )
+    proxy_loc = loc_proxy.get("location") or {}
+    check(resp.status_code == 200 and proxy_loc.get("egress_mode") == "proxy",
+          "ساخت لوکیشن با خروج پروکسی IP", str(proxy_loc.get("egress_mode")))
+    env_snippet_proxy = loc_proxy.get("env") or ""
+    check(f"MLP_PROXY_LIST=mlp:secret@127.0.0.1:{socks.port}" in env_snippet_proxy
+          and "MLP_EGRESS=proxy" in env_snippet_proxy,
+          "اسنیپت متغیرهای نود شامل تنظیمات پروکسی")
+
+    # همان تنظیمات را روی نودِ در حال اجرا اعمال می‌کنیم (شبیه‌سازی env سرویس نود)
+    proxy_env = os.environ.copy()
+    proxy_env.update({
+        "MLP_PANEL_URL": f"http://127.0.0.1:{PANEL_PORT}",
+        "MLP_NODE_TOKEN": token,
+        "MLP_EGRESS": "proxy",
+        "MLP_PROXY_TYPE": "socks5h",
+        "MLP_PROXY_LIST": f"mlp:secret@127.0.0.1:{socks.port}",
+        "MLP_PROXY_ROTATE": "fastest",
+        "PORT": str(node_proxy_port),
+    })
+    node_proxy = subprocess.Popen(
+        [PY, "-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", str(node_proxy_port), "--log-level", "warning"],
+        cwd=ROOT / "node", env=proxy_env, stdout=open(data_dir / "node-proxy.log", "w"), stderr=subprocess.STDOUT,
+    )
+    waiter = await asyncio.get_event_loop().run_in_executor(None, wait_port, node_proxy_port, 40, node_proxy)
+    check(bool(waiter), "بالا آمدن نود با خروج پروکسی")
+
+    egress_status = None
+    for _ in range(20):
+        await asyncio.sleep(1)
+        try:
+            async with _httpx.AsyncClient(timeout=10.0) as client:
+                r = await client.get(f"http://127.0.0.1:{node_proxy_port}/egress?key={token}")
+            egress_status = r.json().get("egress") or {}
+            if egress_status.get("configured"):
+                break
+        except Exception:
+            continue
+    check((egress_status or {}).get("mode") == "proxy",
+          "نود حالت خروج را می‌پذیرد", str((egress_status or {}).get("mode")))
+    check(bool((egress_status or {}).get("paths")) and "127.0.0.1" in json_dumps(egress_status),
+          "پروکسی IP در فهرست مسیرهای خروج")
+
+    # ترافیک واقعی از میان پروکسی رد شود
+    text_p = ""
+    try:
+        got_p = await open_tunnel(node_proxy_port, user["uuid"], target_host, target_port,
+                                  b"GET /healthz HTTP/1.1\r\nHost: p\r\nConnection: close\r\n\r\n")
+        raw_p = got_p[2:] if got_p[:2] == b"\x00\x00" else got_p
+        text_p = raw_p.decode("utf-8", "replace")
+    except Exception as exc:
+        text_p = f"{type(exc).__name__}: {exc}"
+    check("HTTP/1.1 200" in text_p, "ترافیک کاربر از پروکسی IP عبور کرد",
+          text_p.split("\r\n")[0][:60] if text_p else "بدون پاسخ")
+    check(socks.connections >= 1, "پروکسی واقعاً استفاده شد", f"connections={socks.connections}")
+    check(("127.0.0.1", target_port) in socks.targets, "مقصد درست به پروکسی داده شد", str(socks.targets[:2]))
+
+    # تست زنده‌ی مسیرها از خود نود
+    try:
+        async with _httpx.AsyncClient(timeout=25.0) as client:
+            r = await client.get(f"http://127.0.0.1:{node_proxy_port}/egress?key={token}&test=1")
+        test_data = r.json().get("test") or {}
+        check(bool(test_data.get("results")) and any(x["ok"] for x in test_data["results"]),
+              "تست زنده‌ی مسیر خروج (پروکسی سالم)", json_dumps(test_data.get("results", []))[:90])
+    except Exception as exc:
+        check(False, "تست زنده‌ی مسیر خروج", f"{type(exc).__name__}: {exc}")
+
+    # پروکسی خراب → در حالت auto باید به مسیر مستقیم برگردد
+    bad_env = dict(proxy_env)
+    bad_env.update({"MLP_EGRESS": "auto", "MLP_PROXY_LIST": "127.0.0.1:9", "MLP_EGRESS_FALLBACK": "1",
+                    "PORT": str(node_auto_port)})
+    node_auto = subprocess.Popen(
+        [PY, "-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", str(node_auto_port), "--log-level", "warning"],
+        cwd=ROOT / "node", env=bad_env, stdout=open(data_dir / "node-auto.log", "w"), stderr=subprocess.STDOUT,
+    )
+    waiter2 = await asyncio.get_event_loop().run_in_executor(None, wait_port, node_auto_port, 40, node_auto)
+    check(bool(waiter2), "بالا آمدن نود حالت auto (پروکسی خراب)")
+    await asyncio.sleep(6)
+    text_auto = ""
+    try:
+        got_a = await open_tunnel(node_auto_port, user["uuid"], target_host, target_port,
+                                  b"GET /healthz HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n")
+        raw_a = got_a[2:] if got_a[:2] == b"\x00\x00" else got_a
+        text_auto = raw_a.decode("utf-8", "replace")
+    except Exception as exc:
+        text_auto = f"{type(exc).__name__}: {exc}"
+    check("HTTP/1.1 200" in text_auto, "حالت auto با پروکسی خراب → fallback به مسیر مستقیم",
+          text_auto.split("\r\n")[0][:60] if text_auto else "بدون پاسخ")
+
+    # ── مسیر خروج: تانل/چین به نود دیگر ──
+    print(f"{YELLOW}==> تست مسیر خروج: تانل/چین (VLESS روی WS){RESET}")
+    chain_env = os.environ.copy()
+    chain_env.update({
+        "MLP_PANEL_URL": f"http://127.0.0.1:{PANEL_PORT}",
+        "MLP_NODE_TOKEN": token,
+        "MLP_EGRESS": "chain",
+        "MLP_CHAIN_HOST": "127.0.0.1",
+        "MLP_CHAIN_PORT": str(NODE_PORT),
+        "MLP_CHAIN_PATH": "/ws",
+        "MLP_CHAIN_UUID": user["uuid"],
+        "MLP_CHAIN_TLS": "0",
+        "PORT": str(node_chain_port),
+    })
+    node_chain = subprocess.Popen(
+        [PY, "-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", str(node_chain_port), "--log-level", "warning"],
+        cwd=ROOT / "node", env=chain_env, stdout=open(data_dir / "node-chain.log", "w"), stderr=subprocess.STDOUT,
+    )
+    waiter3 = await asyncio.get_event_loop().run_in_executor(None, wait_port, node_chain_port, 40, node_chain)
+    check(bool(waiter3), "بالا آمدن نود با خروج تانل")
+    await asyncio.sleep(6)
+    text_chain = ""
+    try:
+        got_c = await open_tunnel(node_chain_port, user["uuid"], target_host, target_port,
+                                  b"GET /healthz HTTP/1.1\r\nHost: c\r\nConnection: close\r\n\r\n")
+        raw_c = got_c[2:] if got_c[:2] == b"\x00\x00" else got_c
+        text_chain = raw_c.decode("utf-8", "replace")
+    except Exception as exc:
+        text_chain = f"{type(exc).__name__}: {exc}"
+    check("HTTP/1.1 200" in text_chain, "ترافیک از تانل VLESS عبور کرد و برگشت",
+          text_chain.split("\r\n")[0][:60] if text_chain else "بدون پاسخ")
+
+    # مسیر خروج فعال در گزارش نود به پنل دیده شود
+    await asyncio.sleep(5)
+    _, hz_chain = await http_json(f"http://127.0.0.1:{node_chain_port}/healthz?key={token}")
+    check("egress" in hz_chain and hz_chain["egress"]["mode"] == "chain",
+          "وضعیت خروج در /healthz نود", str((hz_chain.get("egress") or {}).get("active", ""))[:60])
+    _, locs_after = await http_json(f"http://127.0.0.1:{PANEL_PORT}/api/admin/locations", cookies=cookies)
+    row_proxy = [l for l in locs_after.get("locations", []) if l["id"] == proxy_loc.get("id")]
+    check(bool(row_proxy) and row_proxy[0].get("egress_mode") == "proxy",
+          "حالت خروج لوکیشن در پنل ذخیره شد")
+
+    # تغییر مسیر خروج از پنل → روی نود زنده اعمال شود (بدون ری‌استارت)
+    await http_json(
+        f"http://127.0.0.1:{PANEL_PORT}/api/admin/locations", "POST",
+        {"id": location["id"], "name": location["name"], "flag": location["flag"], "host": location["host"],
+         "transports": ["ws", "xhttp"], "engine": "python", "egress_mode": "proxy",
+         "egress": {"proxy": {"type": "socks5h", "list": [f"mlp:secret@127.0.0.1:{socks.port}"]}}},
+        cookies,
+    )
+    applied = False
+    for _ in range(20):
+        await asyncio.sleep(1)
+        try:
+            async with _httpx.AsyncClient(timeout=8.0) as client:
+                r = await client.get(f"http://127.0.0.1:{NODE_PORT}/egress?key={token}")
+            if (r.json().get("egress") or {}).get("mode") == "proxy":
+                applied = True
+                break
+        except Exception:
+            continue
+    check(applied, "تغییر مسیر خروج از پنل، زنده روی نود اعمال شد")
+
+
+    # ── ترابرد TCP خام (ورودی VLESS روی TCP) ──
+    print(f"{YELLOW}==> تست ترابرد TCP و نقش پروکسی IP برای ورکر{RESET}")
+    tcp_env = os.environ.copy()
+    tcp_env.update({
+        "MLP_PANEL_URL": f"http://127.0.0.1:{PANEL_PORT}",
+        "MLP_NODE_TOKEN": token,
+        "MLP_TCP_PORT": str(node_tcp_port),
+        "PORT": str(node_tcp_port + 1),
+    })
+    node_tcp = subprocess.Popen(
+        [PY, "-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", str(node_tcp_port + 1),
+         "--log-level", "warning"],
+        cwd=ROOT / "node", env=tcp_env, stdout=open(data_dir / "node-tcp.log", "w"), stderr=subprocess.STDOUT,
+    )
+    waiter_t = await asyncio.get_event_loop().run_in_executor(None, wait_port, node_tcp_port, 40, node_tcp)
+    check(bool(waiter_t), "بالا آمدن نود با ورودی TCP")
+    await asyncio.sleep(4)
+    text_tcp = ""
+    try:
+        reader, writer = await asyncio.open_connection("127.0.0.1", node_tcp_port)
+        writer.write(build_vless_header(user["uuid"], target_host, target_port)
+                     + b"GET /healthz HTTP/1.1\r\nHost: tcp\r\nConnection: close\r\n\r\n")
+        await writer.drain()
+        chunks = []
+        for _ in range(40):
+            try:
+                chunk = await asyncio.wait_for(reader.read(65536), timeout=3.0)
+            except asyncio.TimeoutError:
+                break
+            if not chunk:
+                break
+            chunks.append(chunk)
+            if sum(len(c) for c in chunks) > 4096:
+                break
+        raw_tcp = b"".join(chunks)
+        text_tcp = (raw_tcp[2:] if raw_tcp[:2] == b"\x00\x00" else raw_tcp).decode("utf-8", "replace")
+        writer.close()
+    except Exception as exc:
+        text_tcp = f"{type(exc).__name__}: {exc}"
+    check("HTTP/1.1 200" in text_tcp, "تونل VLESS روی TCP خام کار می‌کند",
+          text_tcp.split("\r\n")[0][:60] if text_tcp else "بدون پاسخ")
+
+    # همان پورت می‌تواند «پروکسی IP» ورکر Cloudflare باشد: هدر VLESS + مقصد
+    text_proxyip = ""
+    try:
+        reader2, writer2 = await asyncio.open_connection("127.0.0.1", node_tcp_port)
+        writer2.write(build_vless_header(user["uuid"], target_host, target_port)
+                      + b"GET /healthz HTTP/1.1\r\nHost: worker\r\nConnection: close\r\n\r\n")
+        await writer2.drain()
+        got2 = await asyncio.wait_for(reader2.read(2048), timeout=6.0)
+        text_proxyip = (got2[2:] if got2[:2] == b"\x00\x00" else got2).decode("utf-8", "replace")
+        writer2.close()
+    except Exception as exc:
+        text_proxyip = f"{type(exc).__name__}: {exc}"
+    check("HTTP/1.1 200" in text_proxyip, "نود نقش ProxyIP برای ورکر را هم دارد",
+          text_proxyip.split("\r\n")[0][:60] if text_proxyip else "بدون پاسخ")
+
+    with contextlib.suppress(Exception):
+        node_tcp.send_signal(signal.SIGTERM)
+        node_tcp.wait(timeout=8)
+
+    # ── ورکر Cloudflare: بررسی سلامت کد و پشتیبانی مسیر خروج ──
+    worker_js = (ROOT / "worker" / "worker.js").read_text(encoding="utf-8")
+    check("PROXYIP_UUID" in worker_js and "CHAIN_URL" in worker_js and "egressInfo" in worker_js,
+          "ورکر: پشتیبانی پروکسی IP و تانل/چین")
+    node_check = subprocess.run(["node", "--check", str(ROOT / "worker" / "worker.mjs")],
+                                capture_output=True, text=True) if (ROOT / "worker" / "worker.mjs").exists() else None
+    import shutil as _sh
+
+    node_bin = _sh.which("node")
+    if node_bin:
+        tmp_js = data_dir / "worker.mjs"
+        tmp_js.write_text(worker_js, encoding="utf-8")
+        res_node = subprocess.run([node_bin, "--check", str(tmp_js)], capture_output=True, text=True)
+        check(res_node.returncode == 0, "سینتکس ورکر سالم است", (res_node.stderr or "").strip()[:80])
+
+    # تست اندپوینت‌های پنل برای مسیر خروج
+    _, presets = await http_json(f"http://127.0.0.1:{PANEL_PORT}/api/admin/egress/presets", cookies=cookies)
+    check(len(presets.get("presets", [])) >= 4
+          and {p["key"] for p in presets["presets"]} >= {"direct", "proxy-ip", "chain-node", "auto"},
+          "پیش‌تنظیم‌های مسیر خروج در پنل")
+
+    for proc in (node_chain, node_auto, node_proxy):
+        with contextlib.suppress(Exception):
+            proc.send_signal(signal.SIGTERM)
+            proc.wait(timeout=8)
+    await socks.stop()
 
     # ── فایل‌های استقرار Xray ──
     check((ROOT / "node" / "nginx.conf.template").exists() and (ROOT / "node" / "start-xray.sh").exists(),

@@ -17,7 +17,8 @@ import httpx
 from fastapi import FastAPI, Request, Response, WebSocket
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 
-from . import decoy, settings, sync, xhttp
+from . import decoy, settings, sync, tcp_in, xhttp
+from .egress import egress
 from .policy import policy
 from .relay import WsChannel, client_ip_from_headers, read_vless_request, run_tunnel
 
@@ -51,8 +52,11 @@ async def on_startup() -> None:
         settings.PANEL_URL or "(unset)",
         settings.DECOY,
     )
+    if settings.TCP_PORT:
+        app.state.tcp_server = await tcp_in.serve(settings.TCP_PORT)
     asyncio.create_task(sync.sync_loop())
     asyncio.create_task(sync.report_loop())
+    asyncio.create_task(egress.probe_loop())
     if USE_XRAY and xray_engine is not None:
         await asyncio.to_thread(xray_engine.start)
         asyncio.create_task(xray_engine.stats_loop())
@@ -61,6 +65,11 @@ async def on_startup() -> None:
 
 @app.on_event("shutdown")
 async def on_shutdown() -> None:
+    server = getattr(app.state, "tcp_server", None)
+    if server is not None:
+        server.close()
+        with contextlib.suppress(Exception):
+            await server.wait_closed()
     await sync.close()
     if xray_engine is not None:
         xray_engine.stop()
@@ -107,6 +116,7 @@ async def healthz(request: Request):
             "panel_url": settings.PANEL_URL,
         }
     )
+    status["egress"] = egress.status()
     if xray_engine is not None:
         status["xray"] = xray_engine.status()
     return JSONResponse(status)
@@ -125,6 +135,7 @@ async def info(request: Request):
         "flag": settings.NODE_FLAG,
         "ws_path": settings.WS_PATH,
         "xhttp_path": settings.XHTTP_PATH,
+        "tcp_port": settings.TCP_PORT,
         "users": len(policy.users),
         "panel_ok": sync.panel_ok(),
         "decoy": settings.DECOY,
@@ -132,6 +143,17 @@ async def info(request: Request):
     if xray_engine is not None:
         data["xray"] = xray_engine.status()
         data["selfcheck"] = xray_engine.self_check()
+    return JSONResponse(data)
+
+
+@app.get("/egress")
+async def egress_status(request: Request, test: int = 0):
+    """وضعیت مسیر خروج این لوکیشن (با ?test=1 مسیرها واقعاً تست می‌شوند)."""
+    if not _authorized(request):
+        return JSONResponse(_masked_ok())
+    data = {"ok": True, "egress": egress.status()}
+    if test:
+        data["test"] = await egress.test_all()
     return JSONResponse(data)
 
 

@@ -17,7 +17,7 @@
 
 import { connect } from 'cloudflare:sockets';
 
-const VERSION = '1.0.0';
+const VERSION = '1.1.0';
 const WS_PATH = (typeof MLP_WS_PATH !== 'undefined' ? MLP_WS_PATH : '') || '/ws';
 const SYNC_TTL_MS = 30_000;
 const REPORT_INTERVAL_MS = 30_000;
@@ -67,8 +67,57 @@ async function ensureBundle(env) {
   return bundle;
 }
 
+// ─────────── مسیر خروج (Egress): پروکسی IP یا تانل به نود دیگر ───────────
+function egressInfo(env) {
+  if (env.CHAIN_URL && env.CHAIN_UUID) {
+    return { mode: 'chain', target: String(env.CHAIN_URL) };
+  }
+  if (env.PROXYIP) {
+    const uid = String(env.PROXYIP_UUID || '').trim();
+    return { mode: uid ? 'proxy:vless' : 'proxy:raw', target: String(env.PROXYIP) };
+  }
+  return { mode: 'direct', target: 'cloudflare' };
+}
+
+function splitHostPort(raw, fallbackPort) {
+  const value = String(raw || '').trim().replace(/^\w+:\/\//, '');
+  if (value.startsWith('[')) {
+    const idx = value.indexOf(']');
+    return { host: value.slice(1, idx), port: Number(value.slice(idx + 2)) || fallbackPort };
+  }
+  const parts = value.split(':');
+  if (parts.length === 2) return { host: parts[0], port: Number(parts[1]) || fallbackPort };
+  return { host: value, port: fallbackPort };
+}
+
+function uuidToBytes(uuid) {
+  const hex = String(uuid || '').replace(/-/g, '');
+  if (hex.length !== 32) return null;
+  const out = new Uint8Array(16);
+  for (let i = 0; i < 16; i += 1) out[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+  return out;
+}
+
+function vlessTcpHeader(uuid, address, port, atyp, addrBytes) {
+  const uid = uuidToBytes(uuid);
+  if (!uid) return null;
+  const head = new Uint8Array(1 + 16 + 1 + 1 + 2 + 1 + addrBytes.length);
+  let i = 0;
+  head[i++] = 0;
+  head.set(uid, i); i += 16;
+  head[i++] = 0;          // addon length
+  head[i++] = 1;          // TCP
+  head[i++] = (port >> 8) & 0xff;
+  head[i++] = port & 0xff;
+  head[i++] = atyp;
+  head.set(addrBytes, i);
+  return head;
+}
+
 function statusPayload(env) {
+  const eg = egressInfo(env);
   return {
+    egress_mode: `${eg.mode}:${eg.target}`,
     version: VERSION,
     node: env.NODE_NAME || 'cloudflare',
     flag: '☁️',
@@ -120,13 +169,16 @@ function parseVlessHeader(buffer) {
   const addrType = new Uint8Array(buffer.slice(21 + addonLen, 22 + addonLen))[0];
   let addrLen = 0;
   let address = '';
+  let addrBytes = new Uint8Array(0);
   let addrIdx = 22 + addonLen;
   if (addrType === 1) {
     address = new Uint8Array(buffer.slice(addrIdx, addrIdx + 4)).join('.');
     addrLen = 4;
+    addrBytes = new Uint8Array(buffer.slice(addrIdx, addrIdx + 4));
   } else if (addrType === 2) {
     addrLen = new Uint8Array(buffer.slice(addrIdx, addrIdx + 1))[0];
     address = new TextDecoder().decode(buffer.slice(addrIdx + 1, addrIdx + 1 + addrLen));
+    addrBytes = new Uint8Array(buffer.slice(addrIdx, addrIdx + 1 + addrLen));
     addrLen += 1;
   } else if (addrType === 3) {
     const bytes = new Uint8Array(buffer.slice(addrIdx, addrIdx + 16));
@@ -134,6 +186,7 @@ function parseVlessHeader(buffer) {
     for (let i = 0; i < 16; i += 2) parts.push(((bytes[i] << 8) | bytes[i + 1]).toString(16));
     address = parts.join(':');
     addrLen = 16;
+    addrBytes = new Uint8Array(buffer.slice(addrIdx, addrIdx + 16));
   } else {
     return null;
   }
@@ -144,6 +197,8 @@ function parseVlessHeader(buffer) {
     command,
     port,
     address,
+    addrType,
+    addrBytes,
     headerLen,
     payload: buffer.slice(headerLen),
     hasPayload: buffer.byteLength > headerLen,
@@ -226,24 +281,16 @@ async function handleVless(ws, request, env) {
         }
         remote.uuid = parsed.uuid.toLowerCase();
         try {
-          const socket = connect(
-            { hostname: env.PROXYIP ? env.PROXYIP : parsed.address, port: env.PROXYIP ? 443 : parsed.port },
-            { allowHalfOpen: false }
-          );
-          remote.socket = socket;
-          remote.writable = socket.writable;
-          remote.readable = socket.readable;
+          await openEgress(remote, env, parsed);
         } catch (e) {
           closeAll();
           break;
         }
-        const writer = remote.writable.getWriter();
-        if (parsed.hasPayload) {
-          await writer.write(parsed.payload);
-          usage.set(remote.uuid, (usage.get(remote.uuid) || 0) + parsed.payload.byteLength);
+        if (!remote.writer) {
+          closeAll();
+          break;
         }
         pumpRemoteToWs();
-        remote.writer = writer;
         continue;
       }
       await remote.writer.write(value);
@@ -255,6 +302,95 @@ async function handleVless(ws, request, env) {
     closeAll();
     flushUsage(env, false);
   }
+}
+
+// ─────────── باز کردن مسیر خروج: تانل WS ← نود دیگر، یا پروکسی IP ───────────
+async function openEgress(remote, env, parsed) {
+  const chainUrl = String(env.CHAIN_URL || '').trim();
+  if (chainUrl && env.CHAIN_UUID) {
+    const resp = await fetch(chainUrl, {
+      headers: {
+        Upgrade: 'websocket',
+        Connection: 'Upgrade',
+        'User-Agent': 'Mozilla/5.0',
+      },
+    });
+    const upstream = resp.webSocket;
+    if (!upstream) throw new Error('upstream websocket failed');
+    upstream.accept();
+
+    const header = vlessTcpHeader(
+      env.CHAIN_UUID, parsed.address, parsed.port, parsed.addrType, parsed.addrBytes
+    );
+    if (!header) throw new Error('bad CHAIN_UUID');
+
+    // نوشتن در تانل = ارسال پیام WS
+    const writer = upstream;   // WebSocket مستقیم قابل send است
+    remote.writer = {
+      write: async (chunk) => { upstream.send(chunk); },
+      releaseLock: () => {},
+    };
+    const queued = new ReadableStream({
+      start(controller) {
+        upstream.addEventListener('message', (event) => {
+          const data = event.data;
+          if (typeof data === 'string') return;
+          const bytes = new Uint8Array(data);
+          if (!remote.headerSent) {
+            const body = bytes.length > 2 && bytes[0] === 0 && bytes[1] === 0 ? bytes.slice(2) : bytes;
+            remote.headerSent = true;
+            if (body.byteLength) controller.enqueue(body);
+            return;
+          }
+          controller.enqueue(bytes);
+        });
+        upstream.addEventListener('close', () => { try { controller.close(); } catch (e) {} });
+        upstream.addEventListener('error', () => { try { controller.error(new Error('chain error')); } catch (e) {} });
+      },
+    });
+    remote.readable = queued;
+    remote.socket = upstream;
+    upstream.send(header);
+    if (parsed.hasPayload) {
+      upstream.send(parsed.payload);
+      usageAdd(remote, parsed.payload);
+    }
+    return;
+  }
+
+  if (env.PROXYIP) {
+    const { host, port } = splitHostPort(env.PROXYIP, 443);
+    const socket = connect({ hostname: host, port }, { allowHalfOpen: false });
+    remote.socket = socket;
+    remote.writable = socket.writable;
+    remote.readable = socket.readable;
+    const writer = socket.writable.getWriter();
+    remote.writer = writer;
+    const uid = String(env.PROXYIP_UUID || '').trim();
+    if (uid) {
+      // سرور بالادستی VLESS بدون TLS (مثلاً نود خودت با MLP_TCP_PORT)
+      const header = vlessTcpHeader(uid, parsed.address, parsed.port, parsed.addrType, parsed.addrBytes);
+      if (!header) throw new Error('bad PROXYIP_UUID');
+      await writer.write(header);
+    }
+    remote.writer = writer;
+    if (parsed.hasPayload) {
+      await writer.write(parsed.payload);
+      usageAdd(remote, parsed.payload);
+    }
+    return;
+  }
+
+  const socket = connect({ hostname: parsed.address, port: parsed.port }, { allowHalfOpen: false });
+  remote.socket = socket;
+  remote.writable = socket.writable;
+  remote.readable = socket.readable;
+  remote.writer = socket.writable.getWriter();
+}
+
+function usageAdd(remote, chunk) {
+  if (!chunk || !chunk.byteLength) return;
+  usage.set(remote.uuid, (usage.get(remote.uuid) || 0) + chunk.byteLength);
 }
 
 // ─────────────────────────── ساب و صفحه ───────────────────────────
@@ -274,7 +410,7 @@ export default {
     const url = new URL(request.url);
 
     if (url.pathname === '/healthz') {
-      return new Response(JSON.stringify(statusPayload(env)), {
+      return new Response(JSON.stringify(Object.assign(statusPayload(env), { egress: egressInfo(env) })), {
         headers: { 'Content-Type': 'application/json' },
       });
     }
@@ -297,8 +433,10 @@ export default {
       return new Response(null, { status: 101, webSocket: client });
     }
 
+    const egress = egressInfo(env);
     return new Response(
-      `MLP Cloudflare location\nversion: ${VERSION}\nws path: ${WS_PATH}\npanel: ${env.PANEL_URL || '-'}\n`,
+      `MLP Cloudflare location\nversion: ${VERSION}\nws path: ${WS_PATH}\npanel: ${env.PANEL_URL || '-'}\n` +
+      `egress: ${egress.mode} → ${egress.target}\n`,
       { headers: { 'Content-Type': 'text/plain; charset=utf-8' } }
     );
   },

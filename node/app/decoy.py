@@ -176,10 +176,23 @@ def not_found(kind: str = "corp") -> tuple[str, int]:
     return _shell(kind, "صفحه پیدا نشد", body, status=404)
 
 
+# نوع انتخابی از پنل (باندل sync) — بر env اولویت دارد اگر env صریح نباشد
+KIND_OVERRIDE: str | None = None
+
+
+def set_kind(kind: str | None) -> None:
+    """تعیین نوع سایت پوششی از سمت پنل (بدون ری‌استارت)."""
+    global KIND_OVERRIDE
+    kind = (kind or "").strip().lower()
+    KIND_OVERRIDE = kind if kind in SITE_KINDS else None
+
+
 def choose_kind() -> str:
     kind = (os.environ.get("MLP_DECOY") or "auto").strip().lower()
     if kind in SITE_KINDS:
         return kind
+    if KIND_OVERRIDE:
+        return KIND_OVERRIDE
     if kind in ("none", "off", "0"):
         return "none"
     # انتخاب پایدار بر اساس دامنه/نام سرویس تا با هر ری‌استارت عوض نشود

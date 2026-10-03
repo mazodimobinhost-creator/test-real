@@ -154,7 +154,7 @@ function pageDash() {
       '<div><small class="mut">کاربران</small><b>' + (st.clients || 0) + '</b></div>' +
       '<div><small class="mut">CPU</small><b>' + (st.cpu ? st.cpu + '%' : '—') + '</b></div>' +
       '<div><small class="mut">موتور</small><b style="font-size:15px">' + esc((st.engine || l.engine || 'python')) + '</b></div></div>' +
-      '<div class="mut" style="margin-top:8px">آخرین خبر: ' + ago(l.seen_ago) + '</div></div>';
+      '<div class="mut" style="margin-top:8px">مسیر خروج: ' + esc(l.egress_mode || 'direct') + ' · آخرین خبر: ' + ago(l.seen_ago) + '</div></div>';
   }).join('') || '<div class="card mut">هنوز لوکیشنی نساخته‌ای. از تب «لوکیشن‌ها» یا «آموزش راه‌اندازی» شروع کن.</div>';
   return '<div class="grid g4">' +
     '<div class="card stat"><small>کاربران</small><b>' + (s.users || 0) + '</b><div class="mut">فعال ' + (s.active_users || 0) + ' · محدود ' + (s.limited_users || 0) + ' · منقضی ' + (s.expired_users || 0) + '</div></div>' +
@@ -177,16 +177,18 @@ function pageLocations() {
     (l.cf_host ? '<div class="mut">CF: ' + esc(l.cf_host) + '</div>' : '') + '</td>' +
     '<td>' + (l.transports || []).map(t => '<span class="pill">' + esc(t) + '</span>').join(' ') +
     '<div class="mut">موتور: ' + esc(l.engine || 'python') + '</div></td>' +
+    '<td>' + egressPill(l) + '<div class="mut">' + esc((l.status || {}).egress_mode || '') + '</div></td>' +
     '<td><span class="pill ' + (l.online ? 'ok' : 'bad') + '">' + (l.online ? 'آنلاین' : 'آفلاین') + '</span><div class="mut">' + ago(l.seen_ago) + '</div></td>' +
     '<td><div class="row"><button class="sm ghost" onclick="locEdit(' + l.id + ')">ویرایش</button>' +
     '<button class="sm ghost" onclick="locEnv(' + l.id + ')">متغیرهای نود</button>' +
+    '<button class="sm ghost" onclick="locEgressTest(' + l.id + ')">تست خروج</button>' +
     '<button class="sm ghost" onclick="locRotate(' + l.id + ')">توکن جدید</button>' +
     '<button class="sm bad" onclick="locDel(' + l.id + ')">حذف</button></div></td></tr>').join('')
-    || '<tr><td colspan="5" class="mut">لوکیشنی ثبت نشده است.</td></tr>';
+    || '<tr><td colspan="6" class="mut">لوکیشنی ثبت نشده است.</td></tr>';
   return '<div class="card"><div class="row" style="justify-content:space-between"><h3>🛰 لوکیشن‌ها</h3>' +
     '<div class="row"><button class="ghost" onclick="openSetup()">راهنمای ساخت</button>' +
     '<button onclick="locEdit()">+ لوکیشن جدید</button></div></div>' +
-    '<table><thead><tr><th>نام</th><th>دامنه</th><th>ترابرد / موتور</th><th>وضعیت</th><th>عملیات</th></tr></thead><tbody>' + rows + '</tbody></table>' +
+    '<table><thead><tr><th>نام</th><th>دامنه</th><th>ترابرد / موتور</th><th>مسیر خروج</th><th>وضعیت</th><th>عملیات</th></tr></thead><tbody>' + rows + '</tbody></table>' +
     '<div class="mut" style="margin-top:12px">هر لوکیشن = یک سرویس جدا روی Railway (ریجن دلخواه) با <code style="display:inline;padding:2px 6px">MLP_ROLE=node</code>؛ یا یک ورکر Cloudflare؛ یا یک VPS خودت.</div></div>' + modal();
 }
 function locForm(l) {
@@ -198,6 +200,9 @@ function locForm(l) {
   '<div style="flex:2"><label>ریجن</label><input id="l_region" value="' + esc(l.region || '') + '" placeholder="europe-west4"></div></div>' +
   '<label>دامنه‌ی عمومی نود</label><input id="l_host" value="' + esc(l.host || '') + '" placeholder="node-eu.up.railway.app">' +
   '<label>لوکیشن Cloudflare (اختیاری)</label><input id="l_cf" value="' + esc(l.cf_host || '') + '" placeholder="mlp-cf.example.workers.dev">' +
+  '<label>سایت پوششی این لوکیشن (اگر خالی باشد از env یا auto استفاده می‌شود)</label><select id="l_decoy">' +
+  [['','خودکار (پیش‌فرض)'],['shop','فروشگاه'],['corp','شرکت'],['blog','وبلاگ'],['none','خاموش']].map(x =>
+    '<option value="' + x[0] + '"' + ((l.decoy || '') === x[0] ? ' selected' : '') + '>' + x[1] + '</option>').join('') + '</select>' +
   '<div class="row"><div style="flex:1"><label>موتور دیتاپلین</label><select id="l_engine">' +
   '<option value="python"' + ((l.engine || 'python') === 'python' ? ' selected' : '') + '>python (محدودیت کامل)</option>' +
   '<option value="xray"' + (l.engine === 'xray' ? ' selected' : '') + '>xray (سرعت بالاتر)</option></select></div>' +
@@ -209,14 +214,106 @@ function locForm(l) {
   '<div style="flex:1"><label>مسیر XHTTP</label><input id="l_xhp" value="' + esc(l.xhttp_path || '/xhttp') + '"></div>' +
   '<div style="flex:1"><label>پورت TCP</label><input id="l_tcpp" type="number" value="' + (l.tcp_port || 0) + '"></div></div>' +
   '<label>یادداشت</label><input id="l_note" value="' + esc(l.note || '') + '">' +
+  egressForm(l) +
   '<div class="row"><button class="ok" onclick="locSave(' + (l.id || 0) + ')">ذخیره</button>' +
   '<button class="ghost" onclick="closeModal()">انصراف</button></div>';
 }
-function locEdit(id) { const l = id ? (S.locs || []).find(x => x.id === id) : null; openModal(locForm(l)); }
+function locEdit(id) { const l = id ? (S.locs || []).find(x => x.id === id) : null; openModal(locForm(l)); if (typeof egressToggle === 'function') egressToggle(); }
+function egressConf(l) {
+  const e = (l || {}).egress || {};
+  const proxy = e.proxy || {}, chain = e.chain || {};
+  let list = proxy.list || [];
+  if (typeof list === 'string') list = list.split(/[\n,|]/).map(x => x.trim()).filter(Boolean);
+  return { mode: ((l || {}).egress_mode || e.mode || 'direct').toLowerCase(),
+    fallback: e.fallback !== false, test_target: e.test_target || '', type: proxy.type || 'socks5h',
+    rotate: proxy.rotate || 'fastest', list: (list || []).join('\n'),
+    ch_host: chain.host || '', ch_port: chain.port || 443, ch_path: chain.path || '/ws',
+    ch_uuid: chain.uuid || '', ch_tls: chain.tls !== false, ch_sni: chain.sni || '', ch_insecure: !!chain.insecure };
+}
+function egressPill(l) {
+  const c = egressConf(l);
+  const names = { direct:'مستقیم', proxy:'پروکسی IP', chain:'تانل/چین', auto:'خودکار' };
+  const cls = c.mode === 'direct' ? '' : 'ok';
+  return '<span class="pill ' + cls + '">' + (names[c.mode] || c.mode) + '</span>';
+}
+function egressForm(l) {
+  const c = egressConf(l);
+  const sel = (v, label) => '<option value="' + v + '"' + (c.mode === v ? ' selected' : '') + '>' + label + '</option>';
+  return '<div class="card" style="background:var(--card2);margin:10px 0">' +
+    '<h3 style="font-size:13px">🌐 مسیر خروج این لوکیشن (از کجا به اینترنت وصل شود)</h3>' +
+    '<div class="row"><div style="flex:1"><label>حالت</label><select id="e_mode" onchange="egressToggle()">' +
+      sel('direct', 'مستقیم (خود نود)') + sel('proxy', 'پروکسی IP (SOCKS5/HTTP)') +
+      sel('chain', 'تانل/چین به سرور دیگر') + sel('auto', 'خودکار (خروجی + fallback)') + '</select></div>' +
+    '<div style="flex:2"><label>آدرس تست خروجی</label><input id="e_target" value="' + esc(c.test_target) + '" placeholder="1.1.1.1:443"></div></div>' +
+    '<div id="e_proxy_box">' +
+      '<label>فهرست پروکسی‌ها (هر خط یکی) — نمونه: 1.2.3.4:1080 یا user:pass@1.2.3.4:1080 یا http://1.2.3.4:8080</label>' +
+      '<textarea id="e_list" style="direction:ltr;text-align:left;min-height:70px">' + esc(c.list) + '</textarea>' +
+      '<div class="row"><div style="flex:1"><label>نوع پیش‌فرض</label><select id="e_type">' +
+        ['socks5h:socks5h (DNS روی پروکسی)','socks5:socks5 (DNS محلی)','http:HTTP CONNECT']
+          .map(x => { const p = x.split(':'); return '<option value="' + p[0] + '"' + (c.type === p[0] ? ' selected' : '') + '>' + p[1] + '</option>'; }).join('') +
+      '</select></div><div style="flex:1"><label>انتخاب بین چند پروکسی</label><select id="e_rotate">' +
+        ['fastest:سریع‌ترین','roundrobin:نوبتی','random:تصادفی']
+          .map(x => { const p = x.split(':'); return '<option value="' + p[0] + '"' + (c.rotate === p[0] ? ' selected' : '') + '>' + p[1] + '</option>'; }).join('') +
+      '</select></div></div></div>' +
+    '<div id="e_chain_box">' +
+      '<div class="row"><div style="flex:2"><label>هاست سرور بالادستی</label><input id="e_ch_host" value="' + esc(c.ch_host) + '" placeholder="node2.up.railway.app"></div>' +
+      '<div style="flex:1"><label>پورت</label><input id="e_ch_port" value="' + (c.ch_port || 443) + '"></div>' +
+      '<div style="flex:1"><label>مسیر</label><input id="e_ch_path" value="' + esc(c.ch_path) + '"></div></div>' +
+      '<label>UUID کاربر روی سرور بالادستی (برای تانل، یک کاربر روی نود دیگر بساز)</label>' +
+      '<input id="e_ch_uuid" style="direction:ltr;text-align:left" value="' + esc(c.ch_uuid) + '" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx">' +
+      '<div class="row"><label class="chk"><input type="checkbox" id="e_ch_tls"' + (c.ch_tls ? ' checked' : '') + '> TLS (wss)</label>' +
+      '<label class="chk"><input type="checkbox" id="e_ch_insecure"' + (c.ch_insecure ? ' checked' : '') + '> نادیده گرفتن خطای گواهی</label>' +
+      '<label class="chk"><input type="checkbox" id="e_fallback"' + (c.fallback ? ' checked' : '') + '> در خرابی خروجی، خودِ نود وصل شود (fallback)</label></div>' +
+      '<div style="flex:1"><label>SNI (اختیاری)</label><input id="e_ch_sni" style="direction:ltr;text-align:left" value="' + esc(c.ch_sni) + '"></div></div>' +
+    '</div></div>';
+}
+function egressToggle() {
+  const mode = $('e_mode').value;
+  const showProxy = (mode === 'proxy' || mode === 'auto');
+  const showChain = (mode === 'chain' || mode === 'auto');
+  if ($('e_proxy_box')) $('e_proxy_box').style.display = showProxy ? 'block' : 'none';
+  if ($('e_chain_box')) $('e_chain_box').style.display = showChain ? 'block' : 'none';
+}
+function egressPayload() {
+  const mode = $('e_mode').value;
+  const e = { mode: mode, fallback: $('e_fallback') ? $('e_fallback').checked : true };
+  if ($('e_target') && $('e_target').value) e.test_target = $('e_target').value;
+  if (mode === 'proxy' || mode === 'auto') {
+    const list = ($('e_list').value || '').split(/[\n,]+/).map(x => x.trim()).filter(Boolean);
+    if (list.length) e.proxy = { type: $('e_type').value, list: list, rotate: $('e_rotate').value };
+  }
+  if (mode === 'chain' || mode === 'auto') {
+    if ($('e_ch_host').value) {
+      e.chain = { host: $('e_ch_host').value.trim(), port: Number($('e_ch_port').value || 443),
+        path: $('e_ch_path').value || '/ws', uuid: $('e_ch_uuid').value.trim(),
+        tls: $('e_ch_tls').checked, sni: $('e_ch_sni').value.trim(), insecure: $('e_ch_insecure').checked };
+    }
+  }
+  return e;
+}
+async function locEgressTest(id) {
+  openModal('<h3>تست مسیر خروج…</h3><div class="mut">از خود نود می‌پرسیم مسیرها را امتحان کند؛ چند ثانیه صبر کن.</div>');
+  try {
+    const d = await api('/api/admin/locations/' + id + '/egress-test', 'POST', {});
+    const t = d.test || {}, rows = (t.results || []).map(r =>
+      '<tr><td>' + esc(r.label) + '</td><td>' + (r.ok ? '<span class="pill ok">سالم</span>' : '<span class="pill bad">خطا</span>') + '</td>' +
+      '<td>' + (r.ok ? (r.latency_ms + ' ms') : esc((r.error || '').slice(0, 60))) + '</td></tr>').join('');
+    openModal('<h3>نتیجه تست مسیر خروج</h3><div class="mut">مقصد: ' + esc(t.target || '') + ' · حالت: ' + esc(t.mode || '') + '</div>' +
+      '<table style="margin-top:8px"><thead><tr><th>مسیر</th><th>وضعیت</th><th>جزئیات</th></tr></thead><tbody>' + rows + '</tbody></table>' +
+      '<button class="ghost" onclick="closeModal()">بستن</button>');
+  } catch (e) {
+    const l = (S.locs || []).find(x => x.id === id) || {};
+    const st = l.status || {};
+    openModal('<h3>نتیجه تست</h3><div class="tip">' + esc(e.message) + '</div>' +
+      '<div class="mut">آخرین وضعیت گزارش‌شده از نود: ' + esc(st.egress_mode || '—') + '</div>' +
+      '<button class="ghost" onclick="closeModal()">بستن</button>');
+  }
+}
 async function locSave(id) {
   const body = { id: id || null, name: $('l_name').value, flag: $('l_flag').value, region: $('l_region').value,
     host: $('l_host').value, cf_host: $('l_cf').value, ws_path: $('l_wsp').value, xhttp_path: $('l_xhp').value,
     engine: $('l_engine').value, tcp_port: Number($('l_tcpp').value || 0), note: $('l_note').value, enabled: true,
+    decoy: $('l_decoy') ? $('l_decoy').value : '', egress_mode: $('e_mode').value, egress: egressPayload(),
     transports: [$('l_ws').checked ? 'ws' : null, $('l_xhttp').checked ? 'xhttp' : null, $('l_tcp').checked ? 'tcp' : null].filter(Boolean) };
   if (!body.name) { toast('نام لازم است', 1); return; }
   if (!body.transports.length) body.transports = ['ws'];

@@ -43,6 +43,50 @@ DECOY_NAME = os.environ.get("MLP_DECOY_NAME", "").strip()
 # در موتور Xray، این پورت داخلی است که nginx ترافیک غیرپروکسی را به آن می‌دهد
 INTERNAL_PORT = int(os.environ.get("MLP_INTERNAL_PORT", "8090"))
 
+# ── مسیر خروج (Egress) ──
+# direct | proxy | chain | auto   ·   auto = اول مسیر تنظیم‌شده، در خرابی مسیر سالم بعدی
+EGRESS = (os.environ.get("MLP_EGRESS") or "direct").strip().lower()
+EGRESS_FALLBACK = (os.environ.get("MLP_EGRESS_FALLBACK") or "1").strip() not in ("0", "false", "no")
+EGRESS_TEST_TARGET = (os.environ.get("MLP_EGRESS_TEST_TARGET") or "1.1.1.1:443").strip()
+EGRESS_PROBE = float(os.environ.get("MLP_EGRESS_PROBE", "0"))
+
+# پروکسی IP (SOCKS5 / SOCKS5h / HTTP CONNECT) — می‌تواند چندتایی باشد
+PROXY_TYPE = (os.environ.get("MLP_PROXY_TYPE") or os.environ.get("MLP_PROXY_PROTOCOL") or "socks5h").strip().lower()
+PROXY_HOST = (os.environ.get("MLP_PROXY_IP") or os.environ.get("MLP_PROXY_HOST") or "").strip()
+PROXY_PORT = int(os.environ.get("MLP_PROXY_PORT") or 1080)
+PROXY_USER = os.environ.get("MLP_PROXY_USER", "")
+PROXY_PASS = os.environ.get("MLP_PROXY_PASS", "")
+PROXY_ROTATE = (os.environ.get("MLP_PROXY_ROTATE") or "fastest").strip().lower()
+PROXY_LIST = [
+    line.strip()
+    for line in (os.environ.get("MLP_PROXY_LIST") or "").replace(",", "\n").splitlines()
+    if line.strip()
+]
+
+# تانل/چین VLESS: خروج از طریق یک سرور بالادستی
+CHAIN_HOST = (os.environ.get("MLP_CHAIN_HOST") or "").strip()
+CHAIN_PORT = int(os.environ.get("MLP_CHAIN_PORT") or 443)
+CHAIN_PATH = (os.environ.get("MLP_CHAIN_PATH") or "/ws").strip()
+CHAIN_UUID = (os.environ.get("MLP_CHAIN_UUID") or "").strip()
+CHAIN_TLS = (os.environ.get("MLP_CHAIN_TLS") or "1").strip() not in ("0", "false", "no")
+CHAIN_SNI = (os.environ.get("MLP_CHAIN_SNI") or "").strip()
+CHAIN_INSECURE = (os.environ.get("MLP_CHAIN_INSECURE") or "0").strip() in ("1", "true", "yes")
+# آدرس سوئیچ ورکر Cloudflare/تانل آماده (برای مستندسازی و اسنیپت‌ها)
+CHAIN_LABEL = (os.environ.get("MLP_CHAIN_LABEL") or "").strip()
+
+
+def chain_config() -> dict:
+    return {
+        "host": CHAIN_HOST,
+        "port": CHAIN_PORT,
+        "path": CHAIN_PATH,
+        "uuid": CHAIN_UUID,
+        "tls": CHAIN_TLS,
+        "sni": CHAIN_SNI,
+        "insecure": CHAIN_INSECURE,
+    }
+
+
 # بهینه‌سازی: اندازه‌ی بافر خواندن و آستانه‌ی درین تطبیقی
 READ_BUFFER = int(os.environ.get("MLP_READ_BUFFER", str(128 * 1024)))
 DRAIN_HIGH_WATER = int(os.environ.get("MLP_DRAIN_HIGH_WATER", str(2 * 1024 * 1024)))

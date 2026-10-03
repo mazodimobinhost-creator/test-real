@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 
+import httpx
 from fastapi import APIRouter, Cookie, HTTPException, Request
 from pydantic import BaseModel
 
@@ -136,6 +137,9 @@ class LocationIn(BaseModel):
     tcp_port: int = 0
     cf_host: str = ""
     engine: str = "python"
+    decoy: str = ""
+    egress_mode: str = "direct"
+    egress: dict = {}
     enabled: bool = True
     sort: int = 0
     note: str = ""
@@ -619,3 +623,54 @@ async def tutorial_save(body: TutorialIn, mlp_sid: str | None = Cookie(default=N
 async def brand_get(mlp_sid: str | None = Cookie(default=None)):
     require_admin(mlp_sid)
     return {"ok": True, "brand": store.brand(), "secret_path": store.secret_path()}
+
+
+# ───────────────────────────── مسیر خروج لوکیشن ─────────────────────────────
+@router.post("/locations/{lid}/egress-test")
+async def location_egress_test(lid: int, mlp_sid: str | None = Cookie(default=None)):
+    """تست زنده‌ی مسیر خروج: از نود می‌خواهیم مسیرها را واقعاً امتحان کند."""
+    require_admin(mlp_sid)
+    location = store.get_location(lid)
+    if not location:
+        raise HTTPException(status_code=404, detail="لوکیشن پیدا نشد")
+    host = (location.get("host") or "").strip()
+    if not host:
+        raise HTTPException(status_code=400, detail="لوکیشن دامنه‌ای ثبت‌شده ندارد")
+    base = host if host.startswith("http") else f"https://{host}"
+    url = f"{base.rstrip('/')}/egress?key={location['token']}&test=1"
+    try:
+        async with httpx.AsyncClient(timeout=25.0) as client:
+            resp = await client.get(url)
+        if resp.status_code != 200:
+            raise HTTPException(status_code=502, detail=f"نود پاسخ داد HTTP {resp.status_code}")
+        data = resp.json()
+        store.log_event("location", f"تست مسیر خروج «{location['name']}» انجام شد", "info")
+        return {"ok": True, "node": data.get("egress"), "test": data.get("test"), "source": url}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"نود در دسترس نبود ({type(exc).__name__})؛ وضعیت آخرین گزارش را ببین",
+        )
+
+
+@router.get("/egress/presets")
+async def egress_presets(mlp_sid: str | None = Cookie(default=None)):
+    """پیش‌تنظیم‌های آماده‌ی مسیر خروج برای استفاده در فرم لوکیشن."""
+    require_admin(mlp_sid)
+    return {
+        "ok": True,
+        "presets": [
+            {"key": "direct", "title": "مستقیم (خود نود)", "mode": "direct", "egress": {}},
+            {"key": "proxy-ip", "title": "پروکسی IP (SOCKS5)", "mode": "proxy",
+             "egress": {"proxy": {"type": "socks5h", "list": ["1.2.3.4:1080"], "rotate": "fastest"}}},
+            {"key": "proxy-http", "title": "پروکسی IP (HTTP CONNECT)", "mode": "proxy",
+             "egress": {"proxy": {"type": "http", "list": ["1.2.3.4:8080"], "rotate": "fastest"}}},
+            {"key": "chain-node", "title": "تانل به نود دیگر (VLESS/WS)", "mode": "chain",
+             "egress": {"chain": {"host": "node2.example.com", "port": 443, "path": "/ws",
+                                  "uuid": "UUID-کاربر-روی-نود-بالادستی", "tls": True, "sni": ""}}},
+            {"key": "auto", "title": "خودکار (خروجی تنظیم‌شده، در خرابی مسیر بعدی)", "mode": "auto",
+             "egress": {"fallback": True}},
+        ],
+    }

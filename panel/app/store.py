@@ -198,7 +198,12 @@ def _ensure_columns() -> None:
     """مهاجرت‌های سبک: ستون‌های جدید روی پایگاه‌داده‌ی قدیمی."""
     wanted = {
         "users": {"reseller_id": "INTEGER NOT NULL DEFAULT 0"},
-        "locations": {"engine": "TEXT NOT NULL DEFAULT 'python'"},
+        "locations": {
+            "engine": "TEXT NOT NULL DEFAULT 'python'",
+            "decoy": "TEXT NOT NULL DEFAULT ''",
+            "egress_mode": "TEXT NOT NULL DEFAULT 'direct'",
+            "egress_json": "TEXT NOT NULL DEFAULT '{}'",
+        },
         "plans": {"reseller_price": "INTEGER NOT NULL DEFAULT 0"},
     }
     for table, cols in wanted.items():
@@ -319,6 +324,26 @@ def _location_row(row: sqlite3.Row) -> dict:
     return d
 
 
+def location_egress(location: dict) -> dict:
+    """پیکربندی مسیر خروج برای نود.
+
+    اگر ادمین از پنل مسیر خروجی تنظیم نکرده باشد، دیکشنری خالی برمی‌گردد تا
+    نود از تنظیمات env خودش (متغیرهای سرویس) استفاده کند. به‌محض اینکه در پنل
+    چیزی ذخیره شود، همان اولویت دارد و زنده روی نود اعمال می‌شود.
+    """
+    raw = location.get("egress_json") or "{}"
+    try:
+        conf = json.loads(raw) if isinstance(raw, str) else dict(raw or {})
+    except Exception:
+        conf = {}
+    if not isinstance(conf, dict):
+        conf = {}
+    conf = {k: v for k, v in conf.items() if v not in (None, "", [], {})}
+    if conf:
+        conf["mode"] = str(conf.get("mode") or location.get("egress_mode") or "direct").lower()
+    return conf
+
+
 def list_locations(only_enabled: bool = False) -> list[dict]:
     sql = "SELECT * FROM locations"
     if only_enabled:
@@ -352,6 +377,9 @@ def save_location(data: dict) -> int:
         "tcp_port": int(data.get("tcp_port") or 0),
         "cf_host": str(data.get("cf_host") or "").strip()[:200],
         "engine": str(data.get("engine") or "python").strip().lower()[:12],
+        "decoy": str(data.get("decoy") or "").strip().lower()[:12],
+        "egress_mode": str(data.get("egress_mode") or "direct").strip().lower()[:12],
+        "egress_json": json.dumps(data.get("egress") or {}, ensure_ascii=False)[:4000],
         "enabled": 1 if data.get("enabled", True) else 0,
         "sort": int(data.get("sort") or 0),
         "note": str(data.get("note") or "")[:400],

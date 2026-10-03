@@ -51,6 +51,17 @@ class Bucket:
             nbytes -= take
 
 
+def _egress_summary() -> str:
+    """خلاصه‌ی مسیر خروج برای گزارش به پنل (بدون import چرخه‌ای)."""
+    try:
+        from .egress import egress
+
+        label = egress.active or (egress.paths[0].label if egress.paths else "مستقیم")
+        return f"{egress.mode}:{label}"
+    except Exception:
+        return "direct"
+
+
 class Policy:
     def __init__(self) -> None:
         self.users: dict[str, dict] = {}
@@ -192,6 +203,8 @@ class Policy:
             "bundle_age": int(now - self.bundle_at) if self.bundle_at else -1,
             "ws_path": settings.WS_PATH,
             "xhttp_path": settings.XHTTP_PATH,
+            "engine": settings.ENGINE,
+            "egress_mode": _egress_summary(),
         }
 
     def usage_snapshot(self) -> list[dict]:

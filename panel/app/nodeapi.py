@@ -90,6 +90,8 @@ async def node_sync(request: Request, authorization: str = Header(default=""), x
             "transports": location["transports"],
             "tcp_port": int(location["tcp_port"] or 0),
             "engine": location.get("engine") or "python",
+            "decoy": location.get("decoy") or "",
+            "egress": store.location_egress(location),
         },
         "panel": {
             "title": settings.get("panel_title") or "MLP",
@@ -147,20 +149,58 @@ async def node_health():
     return {"ok": True, "service": "mlp", "version": APP_VERSION}
 
 
+def egress_env_lines(location: dict) -> list[str]:
+    """خطوط env مربوط به مسیر خروج (برای اسنیپت سرویس نود)."""
+    conf = store.location_egress(location)
+    mode = conf.get("mode") or "direct"
+    lines = [f"MLP_EGRESS={mode}"]
+    proxy = conf.get("proxy") or {}
+    entries = proxy.get("list")
+    if isinstance(entries, str):
+        entries = [x.strip() for x in entries.replace(",", "\n").splitlines() if x.strip()]
+    entries = [str(x) for x in (entries or []) if str(x).strip()]
+    if mode in ("proxy", "auto") and entries:
+        lines.append(f"MLP_PROXY_LIST={'|'.join(entries)}")
+        if proxy.get("type"):
+            lines.append(f"MLP_PROXY_TYPE={proxy['type']}")
+        if proxy.get("rotate"):
+            lines.append(f"MLP_PROXY_ROTATE={proxy['rotate']}")
+    chain = conf.get("chain") or {}
+    if mode in ("chain", "auto") and chain.get("host"):
+        lines += [
+            f"MLP_CHAIN_HOST={chain['host']}",
+            f"MLP_CHAIN_PORT={int(chain.get('port') or 443)}",
+            f"MLP_CHAIN_PATH={chain.get('path') or '/ws'}",
+            f"MLP_CHAIN_UUID={chain.get('uuid') or ''}",
+            f"MLP_CHAIN_TLS={1 if chain.get('tls', True) else 0}",
+        ]
+        if chain.get("sni"):
+            lines.append(f"MLP_CHAIN_SNI={chain['sni']}")
+        if chain.get("insecure"):
+            lines.append("MLP_CHAIN_INSECURE=1")
+    if conf.get("test_target"):
+        lines.append(f"MLP_EGRESS_TEST_TARGET={conf['test_target']}")
+    if conf.get("fallback") is False:
+        lines.append("MLP_EGRESS_FALLBACK=0")
+    return lines
+
+
 def node_env_snippet(location: dict, panel_public: str) -> str:
     """متغیرهایی که باید در سرویس نود روی Railway ست شوند."""
     base = panel_public.rstrip("/")
-    return "\n".join(
-        [
-            f"MLP_ROLE=node",
-            f"MLP_PANEL_URL={base}",
-            f"MLP_NODE_TOKEN={location['token']}",
-            f"MLP_NODE_NAME={location['name']}",
-            f"MLP_NODE_FLAG={location['flag']}",
-            f"MLP_WS_PATH={location['ws_path']}",
-            f"MLP_XHTTP_PATH={location['xhttp_path']}",
-        ]
-    )
+    lines = [
+        "MLP_ROLE=node",
+        f"MLP_PANEL_URL={base}",
+        f"MLP_NODE_TOKEN={location['token']}",
+        f"MLP_NODE_NAME={location['name']}",
+        f"MLP_NODE_FLAG={location['flag']}",
+        f"MLP_WS_PATH={location['ws_path']}",
+        f"MLP_XHTTP_PATH={location['xhttp_path']}",
+        f"MLP_ENGINE={location.get('engine') or 'python'}",
+        f"MLP_DECOY={location.get('decoy') or 'auto'}",
+    ]
+    lines += egress_env_lines(location)
+    return "\n".join(lines)
 
 
 def verify_token(location: dict, token: str) -> bool:

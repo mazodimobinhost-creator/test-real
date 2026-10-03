@@ -1,0 +1,12 @@
+[build]
+builder = "dockerfile"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+healthcheckPath = "/healthz"
+healthcheckTimeout = 120
+restartPolicyType = "ALWAYS"
+
+[env]
+MLP_WS_PATH = "/ws"
+MLP_XHTTP_PATH = "/xhttp"

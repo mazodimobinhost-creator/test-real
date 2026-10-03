@@ -1,0 +1,12 @@
+[build]
+builder = "dockerfile"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+healthcheckPath = "/healthz"
+healthcheckTimeout = 120
+restartPolicyType = "ALWAYS"
+
+[env]
+MLP_DATA_DIR = "/data"
+MLP_SUB_PATH = "sub"

@@ -1,0 +1,22 @@
+name: e2e
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: install deps
+        run: pip install -r panel/requirements.txt
+      - name: python syntax check
+        run: |
+          python -m compileall -q panel/app node/app
+      - name: end-to-end test (panel + node + real VLESS client)
+        run: python tools/e2e_test.py

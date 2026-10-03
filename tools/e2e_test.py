@@ -270,6 +270,9 @@ async def main() -> int:
     data_dir = Path("/tmp/mlp-e2e")
     shutil.rmtree(data_dir, ignore_errors=True)
     data_dir.mkdir(parents=True, exist_ok=True)
+    # مهم: فرایند تست هم بعضی توابع پنل را مستقیم import و صدا می‌زند، پس باید
+    # به همان پایگاه‌داده‌ی پنل اشاره کند (وگرنه روی ماشین تازه، جدول‌ها وجود ندارند)
+    os.environ["MLP_DATA_DIR"] = str(data_dir)
     panel_env = os.environ.copy()
     panel_env.update(
         {
@@ -646,6 +649,9 @@ async def main() -> int:
     check(any(t["status"] == "approved" and t["amount"] == 500000 for t in wl.get("txs", [])), "تراکنش در دفتر کیف پول")
 
     # رزیلر با موجودی کم نمی‌تواند خرید کند
+    from panel.app import store as panel_store  # noqa: E402
+
+    panel_store.init_db()  # همان پایگاه‌داده‌ی پنل؛ جدول‌ها برای فراخوانی درون‌فرآیندی لازم است
     from panel.app.bot import _reseller_buy_plan  # noqa: E402
 
     resp, plan = await http_json(
@@ -659,10 +665,30 @@ async def main() -> int:
     _, users_before = await http_json(f"http://127.0.0.1:{PANEL_PORT}/api/admin/users", cookies=cookies)
     rs_row = [r for r in (await http_json(f"http://127.0.0.1:{PANEL_PORT}/api/admin/resellers", cookies=cookies))[1]["resellers"]
               if r["id"] == r_id][0]
-    await _reseller_buy_plan(999999, dict(rs_row, balance=100), plan_id)   # موجودی کم → نباید کاربر بسازد
+
+    # ۱) خرید واقعی: از موجودی کم می‌شود و کاربر ساخته می‌شود
+    balance_before = int(panel_store.reseller_balance(r_id))
+    await _reseller_buy_plan(999999, rs_row, plan_id)
+    balance_after = int(panel_store.reseller_balance(r_id))
+    _, users_after_buy = await http_json(f"http://127.0.0.1:{PANEL_PORT}/api/admin/users", cookies=cookies)
+    bought_user = [u for u in users_after_buy.get("users", []) if u.get("reseller_id") == r_id]
+    check(balance_before - balance_after == computed and len(bought_user) == 1,
+          "خرید رزیلر: کسر از کیف پول + ساخت کاربر",
+          f"{balance_before:,} → {balance_after:,}")
+
+    # ۲) پلن گران‌تر از موجودی: نباید کاربر بسازد و نباید از کیف پول کم شود
+    _, pricey = await http_json(
+        f"http://127.0.0.1:{PANEL_PORT}/api/admin/plans", "POST",
+        {"name": "پلن گران", "traffic_gb": 10, "days": 30, "price": "نامحدود",
+         "reseller_price": balance_after + 1_000_000, "max_ips": 0, "speed_kbps": 0, "enabled": True}, cookies,
+    )
+    pricey_id = (pricey.get("plan") or {}).get("id")
+    users_before = users_after_buy
+    await _reseller_buy_plan(999999, rs_row, pricey_id)   # موجودی کم → نباید کاربر بسازد
     _, users_after = await http_json(f"http://127.0.0.1:{PANEL_PORT}/api/admin/users", cookies=cookies)
-    check(len(users_after.get("users", [])) == len(users_before.get("users", [])),
-          "رزیلر بدون موجودی کافی کاربر نمی‌سازد")
+    check(len(users_after.get("users", [])) == len(users_before.get("users", []))
+          and int(panel_store.reseller_balance(r_id)) == balance_after,
+          "رزیلر بدون موجودی کافی نه کاربر می‌سازد نه شارژ کسر می‌شود")
 
     # کاربر زیرمجموعه رزیلر در پنل دیده شود
     resp, ruser = await http_json(
